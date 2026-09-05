@@ -31,6 +31,10 @@
             </intent-filter>
         </activity>
 
+        <receiver
+            android:name=".GboardTriggerReceiver"
+            android:exported="true" />
+
         <service
             android:name=".OverlayService"
             android:exported="false"

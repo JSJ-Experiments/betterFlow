@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Rect
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.os.Bundle
@@ -22,6 +23,7 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import io.github.libxposed.api.annotations.AfterInvocation
 import io.github.libxposed.api.annotations.BeforeInvocation
 import io.github.libxposed.api.annotations.XposedHooker
+import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -39,29 +41,33 @@ class BetterFlowXposedModule(
         super.onPackageLoaded(param)
         if (!hookInstalled.compareAndSet(false, true)) return
 
-        val onCreate = InputMethodService::class.java.getDeclaredMethod("onCreate")
-        hook(onCreate, ImeOnCreateHooker::class.java)
-
-        val onDestroy = InputMethodService::class.java.getDeclaredMethod("onDestroy")
-        hook(onDestroy, ImeOnDestroyHooker::class.java)
+        hook(
+            InputMethodService::class.java.getDeclaredMethod("onCreate"),
+            ImeOnCreateHooker::class.java,
+        )
+        hook(
+            InputMethodService::class.java.getDeclaredMethod("onDestroy"),
+            ImeOnDestroyHooker::class.java,
+        )
 
         if (param.packageName == GBOARD_PACKAGE) {
-            val onWindowShown = InputMethodService::class.java.getDeclaredMethod("onWindowShown")
-            hook(onWindowShown, ImeWindowShownHooker::class.java)
-
-            val performClick = View::class.java.getDeclaredMethod("performClick")
-            hook(performClick, ViewClickDiagnosticHooker::class.java)
-
-            val dispatchTouch = View::class.java.getDeclaredMethod("dispatchTouchEvent", MotionEvent::class.java)
-            hook(dispatchTouch, ViewTouchDiagnosticHooker::class.java)
-            val dispatchGroupTouch = ViewGroup::class.java.getDeclaredMethod("dispatchTouchEvent", MotionEvent::class.java)
-            hook(dispatchGroupTouch, ViewTouchDiagnosticHooker::class.java)
-            log("$TAG Gboard view-tree + touch diagnostics armed")
+            hook(
+                InputMethodService::class.java.getDeclaredMethod("onWindowShown"),
+                ImeWindowShownHooker::class.java,
+            )
+            // Gboard's visible SoftKeyView is semantic only; actual gestures are
+            // dispatched by the surrounding SoftKeyboardView.
+            hook(
+                ViewGroup::class.java.getDeclaredMethod("dispatchTouchEvent", MotionEvent::class.java),
+                GboardTouchHooker::class.java,
+            )
+            log("$TAG Gboard mic interception armed")
         }
         log("$TAG InputMethodService bridge armed for ${param.packageName}")
     }
 
     private fun installReceiver(service: InputMethodService) {
+        currentIme = WeakReference(service)
         synchronized(receivers) {
             if (receivers.containsKey(service)) return
             val receiver = object : BroadcastReceiver() {
@@ -107,85 +113,95 @@ class BetterFlowXposedModule(
                 runCatching { service.unregisterReceiver(receiver) }
             }
         }
+        if (currentIme?.get() === service) currentIme = null
+        micKeyView = null
+        micGestureActive = false
     }
-
 
     private fun resourceName(view: View): String? = if (view.id != View.NO_ID) {
         runCatching { view.resources.getResourceName(view.id) }.getOrNull()
     } else null
 
-    private fun viewSummary(view: View): String {
-        val location = IntArray(2)
-        runCatching { view.getLocationOnScreen(location) }
-        return "class=${view.javaClass.name} id=${view.id} res=${resourceName(view) ?: "-"} " +
-            "desc=${view.contentDescription ?: "-"} pos=${location[0]},${location[1]} " +
-            "size=${view.width}x${view.height} visible=${view.visibility == View.VISIBLE}"
-    }
-
-    private fun dumpImeTree(service: InputMethodService) {
-        val root = service.window?.window?.decorView ?: run {
-            log("$TAG TREE no IME decorView")
-            return
-        }
-        var visited = 0
-        var candidates = 0
-        fun walk(view: View, depth: Int) {
-            visited++
+    private fun locateGboardMic(service: InputMethodService) {
+        val root = service.window?.window?.decorView ?: return
+        var match: View? = null
+        fun walk(view: View) {
+            if (match != null) return
             val res = resourceName(view).orEmpty()
             val desc = view.contentDescription?.toString().orEmpty()
-            val haystack = "$res $desc ${view.javaClass.name}".lowercase()
-            val location = IntArray(2)
-            runCatching { view.getLocationOnScreen(location) }
-            val rootLocation = IntArray(2)
-            runCatching { root.getLocationOnScreen(rootLocation) }
-            val toolbarBand = view.visibility == View.VISIBLE &&
-                location[1] >= rootLocation[1] && location[1] <= rootLocation[1] + 260
-            val interesting = listOf("mic", "voice", "dictat", "speech", "toolbar").any(haystack::contains) ||
-                (toolbarBand && location[0] >= root.width * 4 / 5)
-            if (interesting) {
-                candidates++
-                log("$TAG TREE depth=$depth ${viewSummary(view)}")
+            if (
+                res.endsWith(":id/key_pos_header_power_key") ||
+                (view.javaClass.name == SOFT_KEY_CLASS && desc.equals("Use voice typing", ignoreCase = true))
+            ) {
+                match = view
+                return
             }
             if (view is ViewGroup) {
-                for (i in 0 until view.childCount) walk(view.getChildAt(i), depth + 1)
+                for (i in 0 until view.childCount) walk(view.getChildAt(i))
             }
         }
-        walk(root, 0)
-        log("$TAG TREE complete visited=$visited candidates=$candidates root=${viewSummary(root)}")
+        walk(root)
+        val found = match
+        if (found != null) {
+            micKeyView = WeakReference(found)
+            val rect = Rect()
+            found.getGlobalVisibleRect(rect)
+            log(
+                "$TAG Gboard mic target res=${resourceName(found)} desc=${found.contentDescription} " +
+                    "class=${found.javaClass.name} bounds=$rect",
+            )
+        } else {
+            micKeyView = null
+            log("$TAG Gboard mic target not found in live IME tree")
+        }
     }
 
-    private fun logTouch(view: View, event: MotionEvent) {
-        if (event.actionMasked != MotionEvent.ACTION_UP) return
-        val location = IntArray(2)
-        runCatching { view.getLocationOnScreen(location) }
-        val screenX = location[0] + event.x.toInt()
-        val screenY = location[1] + event.y.toInt()
-        log("$TAG TOUCH up screen=$screenX,$screenY local=${event.x.toInt()},${event.y.toInt()} ${viewSummary(view)}")
-    }
+    private fun handleGboardTouch(callback: BeforeHookCallback) {
+        val view = callback.thisObject as? View ?: return
+        if (view.javaClass.name != SOFT_KEYBOARD_CLASS) return
+        val event = callback.args.firstOrNull() as? MotionEvent ?: return
 
-    private fun logClickedView(view: View) {
-        val resourceName = if (view.id != View.NO_ID) {
-            runCatching { view.resources.getResourceName(view.id) }.getOrNull()
-        } else null
-        val location = IntArray(2)
-        runCatching { view.getLocationOnScreen(location) }
-        val ancestors = buildList {
-            var current = view.parent
-            var depth = 0
-            while (current is View && depth < 6) {
-                val name = if (current.id != View.NO_ID) {
-                    runCatching { current.resources.getResourceName(current.id) }.getOrNull()
-                } else null
-                add("${current.javaClass.name}${name?.let { "#$it" }.orEmpty()}")
-                current = current.parent
-                depth++
+        val target = micKeyView?.get()
+        val bounds = Rect()
+        val targetVisible = target != null && target.getGlobalVisibleRect(bounds)
+        val inside = targetVisible && bounds.contains(event.rawX.toInt(), event.rawY.toInt())
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (!inside) return
+                micGestureActive = true
+                log("$TAG Gboard mic gesture DOWN at ${event.rawX.toInt()},${event.rawY.toInt()}")
+                callback.returnAndSkip(true)
             }
-        }.joinToString(" <- ")
-        log(
-            "$TAG CLICK class=${view.javaClass.name} id=${view.id} res=${resourceName ?: "-"} " +
-                "desc=${view.contentDescription ?: "-"} pos=${location[0]},${location[1]} " +
-                "size=${view.width}x${view.height} ancestors=[$ancestors]",
-        )
+            MotionEvent.ACTION_MOVE -> {
+                if (micGestureActive) callback.returnAndSkip(true)
+            }
+            MotionEvent.ACTION_UP -> {
+                if (!micGestureActive) return
+                micGestureActive = false
+                callback.returnAndSkip(true)
+                log("$TAG Gboard mic gesture UP -> betterFlow toggle")
+                triggerBetterFlow()
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (!micGestureActive) return
+                micGestureActive = false
+                callback.returnAndSkip(true)
+                log("$TAG Gboard mic gesture CANCEL")
+            }
+        }
+    }
+
+    private fun triggerBetterFlow() {
+        val service = currentIme?.get() ?: run {
+            log("$TAG cannot trigger betterFlow: no live IME service")
+            return
+        }
+        val intent = Intent(ACTION_GBOARD_TOGGLE)
+            .setClassName(BETTERFLOW_PACKAGE, GBOARD_TRIGGER_RECEIVER)
+        runCatching { service.sendBroadcast(intent) }
+            .onSuccess { log("$TAG sent authenticated Gboard toggle broadcast") }
+            .onFailure { log("$TAG Gboard toggle broadcast failed: ${it.message}", it) }
     }
 
     @XposedHooker
@@ -213,7 +229,6 @@ class BetterFlowXposedModule(
         }
     }
 
-
     @XposedHooker
     class ImeWindowShownHooker : XposedInterface.Hooker {
         companion object {
@@ -222,34 +237,21 @@ class BetterFlowXposedModule(
             fun after(callback: AfterHookCallback) {
                 val service = callback.thisObject as? InputMethodService ?: return
                 Handler(service.mainLooper).postDelayed({
-                    runCatching { activeModule?.dumpImeTree(service) }
-                        .onFailure { activeModule?.log("$TAG dumpImeTree failed: ${it.message}", it) }
-                }, 500L)
+                    runCatching { activeModule?.locateGboardMic(service) }
+                        .onFailure { activeModule?.log("$TAG Gboard mic discovery failed: ${it.message}", it) }
+                }, 350L)
             }
         }
     }
 
     @XposedHooker
-    class ViewTouchDiagnosticHooker : XposedInterface.Hooker {
+    class GboardTouchHooker : XposedInterface.Hooker {
         companion object {
             @JvmStatic
             @BeforeInvocation
             fun before(callback: BeforeHookCallback) {
-                val view = callback.thisObject as? View ?: return
-                val event = callback.args.firstOrNull() as? MotionEvent ?: return
-                runCatching { activeModule?.logTouch(view, event) }
-            }
-        }
-    }
-
-    @XposedHooker
-    class ViewClickDiagnosticHooker : XposedInterface.Hooker {
-        companion object {
-            @JvmStatic
-            @BeforeInvocation
-            fun before(callback: BeforeHookCallback) {
-                val view = callback.thisObject as? View ?: return
-                runCatching { activeModule?.logClickedView(view) }
+                runCatching { activeModule?.handleGboardTouch(callback) }
+                    .onFailure { activeModule?.log("$TAG Gboard touch hook failed: ${it.message}", it) }
             }
         }
     }
@@ -257,7 +259,16 @@ class BetterFlowXposedModule(
     companion object {
         private const val TAG = "betterFlow/Xposed"
         private const val GBOARD_PACKAGE = "com.google.android.inputmethod.latin"
+        private const val BETTERFLOW_PACKAGE = "com.jadenjsj.betterflow"
+        private const val ACTION_GBOARD_TOGGLE = "com.jadenjsj.betterflow.action.GBOARD_TOGGLE"
+        private const val GBOARD_TRIGGER_RECEIVER = "com.jadenjsj.betterflow.GboardTriggerReceiver"
+        private const val SOFT_KEY_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyView"
+        private const val SOFT_KEYBOARD_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyboardView"
+
         @Volatile private var activeModule: BetterFlowXposedModule? = null
+        @Volatile private var currentIme: WeakReference<InputMethodService>? = null
+        @Volatile private var micKeyView: WeakReference<View>? = null
+        @Volatile private var micGestureActive = false
         private val hookInstalled = AtomicBoolean(false)
         private val receivers = WeakHashMap<InputMethodService, BroadcastReceiver>()
     }
