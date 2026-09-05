@@ -438,7 +438,8 @@ class OverlayService : Service() {
         streamWorker = null
         processingJob?.cancel()
         processingJob = null
-        wispr.cancelActiveTranscription()
+        val cancelledHttp = wispr.cancelActiveTranscription()
+        Log.i(TAG, "legacy HTTP call cancelled=$cancelledHttp")
         streamQueue = null
         streamingFailure = null
         currentPcm = ByteArray(0)

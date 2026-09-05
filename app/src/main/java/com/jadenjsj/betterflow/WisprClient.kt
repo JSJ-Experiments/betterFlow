@@ -101,8 +101,10 @@ class WisprClient(context: Context) {
         return texts.joinToString("\n")
     }
 
-    fun cancelActiveTranscription() {
-        activeTranscriptionCall.getAndSet(null)?.cancel()
+    fun cancelActiveTranscription(): Boolean {
+        val call = activeTranscriptionCall.getAndSet(null) ?: return false
+        call.cancel()
+        return true
     }
 
     private fun freshSession(): WisprSession {
