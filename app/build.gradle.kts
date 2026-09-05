@@ -8,6 +8,8 @@ android {
     namespace = "com.jadenjsj.betterflow"
     compileSdk = 36
 
+    val wisprBasetenApiKey = providers.environmentVariable("WISPR_BASETEN_API_KEY").orNull.orEmpty()
+
     defaultConfig {
         applicationId = "com.jadenjsj.betterflow"
         minSdk = 29
@@ -21,7 +23,6 @@ android {
     val releaseStorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull?.takeIf { it.isNotBlank() }
     val releaseAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull?.takeIf { it.isNotBlank() }
     val releaseKeyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull?.takeIf { it.isNotBlank() }
-    val wisprBasetenApiKey = providers.environmentVariable("WISPR_BASETEN_API_KEY").orNull.orEmpty()
 
     signingConfigs {
         create("release") {
