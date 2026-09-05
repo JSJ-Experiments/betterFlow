@@ -122,6 +122,12 @@ class BetterFlowXposedModule(
         runCatching { view.resources.getResourceName(view.id) }.getOrNull()
     } else null
 
+    private fun screenBounds(view: View): Rect {
+        val location = IntArray(2)
+        view.getLocationOnScreen(location)
+        return Rect(location[0], location[1], location[0] + view.width, location[1] + view.height)
+    }
+
     private fun locateGboardMic(service: InputMethodService) {
         val root = service.window?.window?.decorView ?: return
         var match: View? = null
@@ -144,8 +150,7 @@ class BetterFlowXposedModule(
         val found = match
         if (found != null) {
             micKeyView = WeakReference(found)
-            val rect = Rect()
-            found.getGlobalVisibleRect(rect)
+            val rect = screenBounds(found)
             log(
                 "$TAG Gboard mic target res=${resourceName(found)} desc=${found.contentDescription} " +
                     "class=${found.javaClass.name} bounds=$rect",
@@ -162,9 +167,8 @@ class BetterFlowXposedModule(
         val event = callback.args.firstOrNull() as? MotionEvent ?: return
 
         val target = micKeyView?.get()
-        val bounds = Rect()
-        val targetVisible = target != null && target.getGlobalVisibleRect(bounds)
-        val inside = targetVisible && bounds.contains(event.rawX.toInt(), event.rawY.toInt())
+        val bounds = target?.takeIf { it.visibility == View.VISIBLE }?.let(::screenBounds)
+        val inside = bounds?.contains(event.rawX.toInt(), event.rawY.toInt()) == true
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
