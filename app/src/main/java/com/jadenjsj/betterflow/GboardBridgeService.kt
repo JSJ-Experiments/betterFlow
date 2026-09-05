@@ -10,7 +10,7 @@ import android.util.Log
 class GboardBridgeService : Service() {
     private val bridge = object : Binder() {
         override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
-            if (code != TRANSACTION_TOGGLE && code != TRANSACTION_GET_STATE) {
+            if (code != TRANSACTION_TOGGLE && code != TRANSACTION_GET_STATE && code != TRANSACTION_GET_CONFIG) {
                 return super.onTransact(code, data, reply, flags)
             }
             data.enforceInterface(DESCRIPTOR)
@@ -20,13 +20,23 @@ class GboardBridgeService : Service() {
             if (GBOARD_PACKAGE !in callerPackages) {
                 Log.w(TAG, "Rejected Gboard bridge call from uid=$callerUid packages=${callerPackages.joinToString()}")
                 reply?.writeNoException()
-                if (code == TRANSACTION_TOGGLE) reply?.writeInt(0) else reply?.writeString("idle")
+                when (code) {
+                    TRANSACTION_TOGGLE -> reply?.writeInt(0)
+                    TRANSACTION_GET_STATE -> reply?.writeString("idle")
+                    TRANSACTION_GET_CONFIG -> reply?.writeInt(0)
+                }
                 return true
             }
 
             if (code == TRANSACTION_GET_STATE) {
                 reply?.writeNoException()
                 reply?.writeString(VoiceRuntimeState.wireName)
+                return true
+            }
+
+            if (code == TRANSACTION_GET_CONFIG) {
+                reply?.writeNoException()
+                reply?.writeInt(if (Prefs.gboardMicEnabled(this@GboardBridgeService)) 1 else 0)
                 return true
             }
 
@@ -69,6 +79,7 @@ class GboardBridgeService : Service() {
         const val DESCRIPTOR = "com.jadenjsj.betterflow.GboardBridge"
         const val TRANSACTION_TOGGLE = IBinder.FIRST_CALL_TRANSACTION
         const val TRANSACTION_GET_STATE = IBinder.FIRST_CALL_TRANSACTION + 1
+        const val TRANSACTION_GET_CONFIG = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val GBOARD_PACKAGE = "com.google.android.inputmethod.latin"
         private const val TAG = "betterFlow/GboardBridge"
     }

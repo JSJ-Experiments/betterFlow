@@ -25,6 +25,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -54,6 +55,8 @@ private fun SettingsScreen() {
     val coroutine = rememberCoroutineScope()
     var session by remember { mutableStateOf(auth.load()) }
     var backend by remember { mutableStateOf(Prefs.backend(context)) }
+    var gboardMicEnabled by remember { mutableStateOf(Prefs.gboardMicEnabled(context)) }
+    var bubbleEnabled by remember { mutableStateOf(Prefs.bubbleVisible(context)) }
     var email by remember { mutableStateOf(session?.email.orEmpty()) }
     var password by remember { mutableStateOf("") }
     var sessionJson by remember { mutableStateOf("") }
@@ -69,12 +72,66 @@ private fun SettingsScreen() {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("betterFlow", style = MaterialTheme.typography.headlineMedium)
-        Text("Voice typing bubble + root/LSPosed text insertion. Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}).")
+        Text("Gboard mic voice typing + optional floating bubble. Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}).")
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Voice trigger", style = MaterialTheme.typography.titleMedium)
+                Text("Gboard mic is the primary trigger. It is matched semantically, so floating, split, full-width, rotation, and ordinary toolbar movement do not rely on fixed coordinates.")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Use Gboard microphone")
+                        Text("Tap Gboard's voice key to start/finish betterFlow.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(
+                        checked = gboardMicEnabled,
+                        onCheckedChange = { enabled ->
+                            gboardMicEnabled = enabled
+                            Prefs.setGboardMicEnabled(context, enabled)
+                            InputInjector.notifyConfigChanged(context)
+                            status = if (enabled) "Gboard mic trigger enabled" else "Gboard mic restored to original behavior"
+                        },
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Floating microphone")
+                        Text("Legacy always-on-top trigger; optional fallback.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(
+                        checked = bubbleEnabled,
+                        onCheckedChange = { enabled ->
+                            if (enabled && !Settings.canDrawOverlays(context)) {
+                                status = "Overlay permission is required only for the floating microphone"
+                                context.startActivity(
+                                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                )
+                            } else {
+                                bubbleEnabled = enabled
+                                Prefs.setBubbleVisible(context, enabled)
+                                val serviceIntent = Intent(context, OverlayService::class.java)
+                                    .setAction(if (enabled) OverlayService.ACTION_SHOW else OverlayService.ACTION_HIDE)
+                                context.startForegroundService(serviceIntent)
+                                status = if (enabled) "Floating microphone enabled" else "Floating microphone disabled"
+                            }
+                        },
+                    )
+                }
+            }
+        }
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Runtime", style = MaterialTheme.typography.titleMedium)
-                Text("Overlay permission: ${if (Settings.canDrawOverlays(context)) "granted" else "missing"}")
+                Text("Microphone permission is required for both triggers. Overlay permission is needed only when the floating microphone is enabled.")
+                Text("Overlay permission: ${if (Settings.canDrawOverlays(context)) "granted" else "not granted (optional)"}")
                 Text("Root: $rootStatus")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
@@ -84,22 +141,6 @@ private fun SettingsScreen() {
                         }.toTypedArray()
                         permissionLauncher.launch(permissions)
                     }) { Text("Grant runtime perms") }
-                    Button(onClick = {
-                        context.startActivity(
-                            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                        )
-                    }) { Text("Overlay settings") }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = {
-                        context.startForegroundService(Intent(context, OverlayService::class.java).setAction(OverlayService.ACTION_SHOW))
-                        status = "Overlay service started"
-                    }) { Text("Start bubble") }
-                    Button(onClick = {
-                        context.stopService(Intent(context, OverlayService::class.java))
-                        status = "Overlay service stopped"
-                    }) { Text("Stop bubble") }
                     TextButton(onClick = {
                         coroutine.launch { rootStatus = if (RootShell.hasRoot()) "available" else "not granted" }
                     }) { Text("Check root") }
@@ -130,7 +171,7 @@ private fun SettingsScreen() {
                         )
                     }
                 }
-                Text("For direct mode, enable this APK as an LSPosed module and scope it to your keyboard (Gboard is predeclared). Modern LSPosed can hot-reload the module when the APK is updated.")
+                Text("For direct mode and the Gboard mic trigger, enable this APK as an LSPosed module and scope it to Gboard. Restarting Gboard reloads hook-code updates without rebooting Android.")
             }
         }
 

@@ -18,8 +18,22 @@ object Prefs {
     private const val KEY_BUBBLE_X = "bubble_x"
     private const val KEY_BUBBLE_Y = "bubble_y"
     private const val KEY_BUBBLE_VISIBLE = "bubble_visible"
+    private const val KEY_GBOARD_MIC_ENABLED = "gboard_mic_enabled"
+    private const val KEY_VOICE_TRIGGER_V2_MIGRATED = "voice_trigger_v2_migrated"
 
     private fun prefs(context: Context) = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+
+    private fun ensureVoiceTriggerDefaults(context: Context) {
+        val p = prefs(context)
+        if (p.getBoolean(KEY_VOICE_TRIGGER_V2_MIGRATED, false)) return
+        // v1 used the floating bubble as the primary UI. v2 makes the native
+        // Gboard mic the primary trigger and retains the bubble as opt-in.
+        p.edit()
+            .putBoolean(KEY_GBOARD_MIC_ENABLED, true)
+            .putBoolean(KEY_BUBBLE_VISIBLE, false)
+            .putBoolean(KEY_VOICE_TRIGGER_V2_MIGRATED, true)
+            .commit()
+    }
 
     fun backend(context: Context): InputBackend = InputBackend.fromWireName(prefs(context).getString(KEY_BACKEND, InputBackend.AUTO.wireName))
 
@@ -36,10 +50,24 @@ object Prefs {
         prefs(context).edit().putInt(KEY_BUBBLE_X, x).putInt(KEY_BUBBLE_Y, y).apply()
     }
 
-    fun bubbleVisible(context: Context): Boolean = prefs(context).getBoolean(KEY_BUBBLE_VISIBLE, true)
+    fun bubbleVisible(context: Context): Boolean {
+        ensureVoiceTriggerDefaults(context)
+        return prefs(context).getBoolean(KEY_BUBBLE_VISIBLE, false)
+    }
 
     fun setBubbleVisible(context: Context, visible: Boolean) {
+        ensureVoiceTriggerDefaults(context)
         prefs(context).edit().putBoolean(KEY_BUBBLE_VISIBLE, visible).apply()
+    }
+
+    fun gboardMicEnabled(context: Context): Boolean {
+        ensureVoiceTriggerDefaults(context)
+        return prefs(context).getBoolean(KEY_GBOARD_MIC_ENABLED, true)
+    }
+
+    fun setGboardMicEnabled(context: Context, enabled: Boolean) {
+        ensureVoiceTriggerDefaults(context)
+        prefs(context).edit().putBoolean(KEY_GBOARD_MIC_ENABLED, enabled).apply()
     }
 }
 

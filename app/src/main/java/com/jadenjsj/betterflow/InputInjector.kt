@@ -94,16 +94,31 @@ class InputInjector(private val context: Context) {
     companion object {
         const val ACTION_COMMIT_TEXT = "com.jadenjsj.betterflow.action.COMMIT_TEXT"
         const val ACTION_VOICE_STATE = "com.jadenjsj.betterflow.action.VOICE_STATE"
+        const val ACTION_CONFIG_CHANGED = "com.jadenjsj.betterflow.action.CONFIG_CHANGED"
         const val COMMIT_PERMISSION = "com.jadenjsj.betterflow.permission.COMMIT_TEXT"
         const val EXTRA_TEXT = "text"
         const val EXTRA_REQUEST_ID = "request_id"
         const val EXTRA_DEADLINE_ELAPSED_REALTIME = "deadline_elapsed_realtime"
         const val EXTRA_VOICE_STATE = "voice_state"
+        const val EXTRA_GBOARD_MIC_ENABLED = "gboard_mic_enabled"
         const val EXTRA_RESULT_RECEIVER = "result_receiver"
         const val RESULT_OK = 1
         const val RESULT_FAILED = 0
         private const val LSPOSED_COMMIT_DEADLINE_MS = 1_000L
         private const val LSPOSED_REPLY_WAIT_MS = 1_250L
         private const val TAG = "betterFlow/InputInjector"
+
+        fun notifyConfigChanged(context: Context) {
+            val flattened = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.DEFAULT_INPUT_METHOD,
+            ) ?: return
+            val imePackage = ComponentName.unflattenFromString(flattened)?.packageName ?: return
+            context.sendBroadcast(
+                Intent(ACTION_CONFIG_CHANGED)
+                    .setPackage(imePackage)
+                    .putExtra(EXTRA_GBOARD_MIC_ENABLED, Prefs.gboardMicEnabled(context)),
+            )
+        }
     }
 }

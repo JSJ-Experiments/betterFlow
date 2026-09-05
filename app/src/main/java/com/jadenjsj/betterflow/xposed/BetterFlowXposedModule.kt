@@ -93,6 +93,14 @@ class BetterFlowXposedModule(
                             log("$TAG voice state <- ${voiceState.wireName}")
                             return
                         }
+                        InputInjector.ACTION_CONFIG_CHANGED -> {
+                            gboardMicEnabled = intent.getBooleanExtra(InputInjector.EXTRA_GBOARD_MIC_ENABLED, true)
+                            micGestureActive = false
+                            micPressed = false
+                            if (gboardMicEnabled) locateGboardMic(service) else restoreMicVisual(micKeyView?.get())
+                            log("$TAG Gboard mic config <- enabled=$gboardMicEnabled")
+                            return
+                        }
                         InputInjector.ACTION_COMMIT_TEXT -> Unit
                         else -> return
                     }
@@ -137,6 +145,7 @@ class BetterFlowXposedModule(
             val filter = IntentFilter().apply {
                 addAction(InputInjector.ACTION_COMMIT_TEXT)
                 addAction(InputInjector.ACTION_VOICE_STATE)
+                addAction(InputInjector.ACTION_CONFIG_CHANGED)
             }
             if (Build.VERSION.SDK_INT >= 33) {
                 service.registerReceiver(receiver, filter, InputInjector.COMMIT_PERMISSION, null, Context.RECEIVER_EXPORTED)
@@ -174,9 +183,9 @@ class BetterFlowXposedModule(
         }
         micPressed = false
         voiceState = VoiceState.IDLE
-        setMicVisual(VoiceState.IDLE)
-        clearMicStateOverlay(micKeyView?.get())
+        restoreMicVisual(micKeyView?.get())
         micKeyView = null
+        micOriginalContentDescription = null
         micGestureActive = false
     }
 
@@ -190,38 +199,67 @@ class BetterFlowXposedModule(
         return Rect(location[0], location[1], location[0] + view.width, location[1] + view.height)
     }
 
+    private data class MicCandidate(val view: View, val score: Int, val signals: String)
+
+    private fun micCandidate(view: View): MicCandidate? {
+        val res = resourceName(view).orEmpty()
+        val resLower = res.lowercase()
+        val desc = view.contentDescription?.toString().orEmpty()
+        val descLower = desc.lowercase()
+        val signals = mutableListOf<String>()
+        var score = 0
+
+        val resourceSemantic = VOICE_RESOURCE_TOKENS.any { it in resLower }
+        val descriptionSemantic = VOICE_DESCRIPTION_TOKENS.any { it in descLower }
+        val knownVoiceSlot = res.endsWith(":id/key_pos_header_power_key")
+        val softKey = view.javaClass.name == SOFT_KEY_CLASS
+
+        if (resourceSemantic) { score += 9; signals += "semantic-resource" }
+        if (descriptionSemantic) { score += 9; signals += "semantic-description" }
+        if (knownVoiceSlot) { score += 7; signals += "known-header-slot" }
+        if (softKey) { score += 10; signals += "soft-key" }
+        if (view.isShown) { score += 1; signals += "shown" }
+
+        // Fail safe: position/slot identity is only a ranking hint. We intercept
+        // only a view that advertises voice semantics through its resource or
+        // accessibility description. If Gboard changes unexpectedly, its native
+        // behavior wins instead of betterFlow stealing the wrong key.
+        val semanticallyVoice = resourceSemantic || descriptionSemantic
+        if (!semanticallyVoice) return null
+        return MicCandidate(view, score, signals.joinToString("+"))
+    }
+
     private fun locateGboardMic(service: InputMethodService) {
         val root = service.window?.window?.decorView ?: return
-        var match: View? = null
+        var best: MicCandidate? = null
         fun walk(view: View) {
-            if (match != null) return
-            val res = resourceName(view).orEmpty()
-            val desc = view.contentDescription?.toString().orEmpty()
-            if (
-                res.endsWith(":id/key_pos_header_power_key") ||
-                (view.javaClass.name == SOFT_KEY_CLASS && desc.equals("Use voice typing", ignoreCase = true))
-            ) {
-                match = view
-                return
+            micCandidate(view)?.let { candidate ->
+                if (best == null || candidate.score > best!!.score) best = candidate
             }
             if (view is ViewGroup) {
                 for (i in 0 until view.childCount) walk(view.getChildAt(i))
             }
         }
         walk(root)
-        val found = match
+        val found = best?.view
         if (found != null) {
             val previous = micKeyView?.get()
-            if (previous != null && previous !== found) clearMicStateOverlay(previous)
+            if (previous !== found) {
+                restoreMicVisual(previous)
+                micOriginalContentDescription = found.contentDescription
+            }
             micKeyView = WeakReference(found)
             setMicVisual(voiceState)
             log(
-                "$TAG Gboard mic target res=${resourceName(found)} desc=${found.contentDescription} " +
+                "$TAG Gboard mic target score=${best?.score} signals=${best?.signals} " +
+                    "res=${resourceName(found)} desc=${found.contentDescription} " +
                     "class=${found.javaClass.name} bounds=${screenBounds(found)}",
             )
         } else {
+            restoreMicVisual(micKeyView?.get())
             micKeyView = null
-            log("$TAG Gboard mic target not found in live IME tree")
+            micOriginalContentDescription = null
+            log("$TAG Gboard mic target not found in live IME tree; original Gboard behavior preserved")
         }
     }
 
@@ -229,9 +267,16 @@ class BetterFlowXposedModule(
         val view = callback.thisObject as? View ?: return
         if (view.javaClass.name != SOFT_KEYBOARD_CLASS) return
         val event = callback.args.firstOrNull() as? MotionEvent ?: return
+        if (!gboardMicEnabled) return
 
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            val current = micKeyView?.get()
+            if (current == null || !current.isAttachedToWindow || !current.isShown || current.width <= 0 || current.height <= 0) {
+                currentIme?.get()?.let(::locateGboardMic)
+            }
+        }
         val target = micKeyView?.get()
-        val bounds = target?.takeIf { it.visibility == View.VISIBLE }?.let(::screenBounds)
+        val bounds = target?.takeIf { it.isAttachedToWindow && it.isShown }?.let(::screenBounds)
         val inside = bounds?.contains(event.rawX.toInt(), event.rawY.toInt()) == true
 
         when (event.actionMasked) {
@@ -283,6 +328,7 @@ class BetterFlowXposedModule(
         val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
                 bridgeBinder = binder
+                syncBridgeConfig()
                 if (pendingToggle) {
                     pendingToggle = false
                     if (!transactToggle()) syncBridgeState()
@@ -370,6 +416,31 @@ class BetterFlowXposedModule(
         }
     }
 
+    private fun syncBridgeConfig() {
+        val binder = bridgeBinder ?: return
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(GBOARD_BRIDGE_DESCRIPTOR)
+            if (!binder.transact(GBOARD_TRANSACTION_GET_CONFIG, data, reply, 0)) return
+            reply.readException()
+            gboardMicEnabled = reply.readInt() != 0
+            if (gboardMicEnabled) {
+                currentIme?.get()?.let(::locateGboardMic)
+            } else {
+                micGestureActive = false
+                micPressed = false
+                restoreMicVisual(micKeyView?.get())
+            }
+            log("$TAG Gboard mic config synced enabled=$gboardMicEnabled")
+        } catch (t: Throwable) {
+            log("$TAG Gboard Binder config query failed: ${t.message}", t)
+        } finally {
+            data.recycle()
+            reply.recycle()
+        }
+    }
+
     private fun triggerBetterFlow(): Boolean {
         val service = currentIme?.get() ?: run {
             log("$TAG cannot trigger betterFlow: no live IME service")
@@ -398,8 +469,22 @@ class BetterFlowXposedModule(
         micStateOverlay = null
     }
 
+    private fun restoreMicVisual(mic: View?) {
+        if (mic == null) return
+        clearMicStateOverlay(mic)
+        mic.scaleX = 1f
+        mic.scaleY = 1f
+        mic.alpha = 1f
+        micOriginalContentDescription?.let { mic.contentDescription = it }
+        mic.invalidate()
+    }
+
     private fun setMicVisual(state: VoiceState) {
         val mic = micKeyView?.get() ?: return
+        if (!gboardMicEnabled) {
+            restoreMicVisual(mic)
+            return
+        }
         clearMicStateOverlay(mic)
         val scale = if (micPressed) 0.82f else when (state) {
             VoiceState.IDLE -> 1.0f
@@ -429,7 +514,7 @@ class BetterFlowXposedModule(
             micStateOverlay = WeakReference(overlay as Drawable)
         }
         mic.contentDescription = when (state) {
-            VoiceState.IDLE -> "Use voice typing"
+            VoiceState.IDLE -> micOriginalContentDescription ?: mic.contentDescription
             VoiceState.RECORDING -> "betterFlow recording; tap to finish"
             VoiceState.PROCESSING -> "betterFlow transcribing"
         }
@@ -506,16 +591,25 @@ class BetterFlowXposedModule(
         private const val GBOARD_BRIDGE_DESCRIPTOR = "com.jadenjsj.betterflow.GboardBridge"
         private const val GBOARD_TRANSACTION_TOGGLE = IBinder.FIRST_CALL_TRANSACTION
         private const val GBOARD_TRANSACTION_GET_STATE = IBinder.FIRST_CALL_TRANSACTION + 1
+        private const val GBOARD_TRANSACTION_GET_CONFIG = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val COMMIT_DEDUPE_TTL_MS = 10_000L
         private const val SOFT_KEY_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyView"
         private const val SOFT_KEYBOARD_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyboardView"
+        private val VOICE_RESOURCE_TOKENS = listOf("voice", "microphone", "dictat", "speech", "mic_")
+        private val VOICE_DESCRIPTION_TOKENS = listOf(
+            "voice", "microphone", "dictat", "speech",
+            "语音", "麦克风", "听写", "音声", "マイク", "음성", "마이크",
+            "suara", "mikrofon", "dikte", "voz", "voix", "voce", "sprache", "голос",
+        )
 
         @Volatile private var activeModule: BetterFlowXposedModule? = null
         @Volatile private var currentIme: WeakReference<InputMethodService>? = null
         @Volatile private var bridgeBinder: IBinder? = null
         @Volatile private var bridgeConnection: ServiceConnection? = null
         @Volatile private var pendingToggle = false
+        @Volatile private var gboardMicEnabled = true
         @Volatile private var micKeyView: WeakReference<View>? = null
+        @Volatile private var micOriginalContentDescription: CharSequence? = null
         @Volatile private var micStateOverlay: WeakReference<Drawable>? = null
         @Volatile private var micGestureActive = false
         @Volatile private var micPressed = false
