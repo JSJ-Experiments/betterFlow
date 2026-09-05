@@ -297,13 +297,18 @@ class BetterFlowXposedModule(
                 micGestureActive = false
                 micPressed = false
                 callback.returnAndSkip(true)
-                if (voiceState == VoiceState.PROCESSING) {
+                val previous = voiceState
+                if (previous == VoiceState.PROCESSING) {
+                    voiceState = VoiceState.IDLE
                     setMicVisual(voiceState)
-                    target?.performHapticFeedback(HapticFeedbackConstants.REJECT)
-                    log("$TAG Gboard mic gesture ignored while processing")
+                    target?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    log("$TAG Gboard mic gesture UP while processing -> cancel")
+                    if (!triggerBetterFlow()) {
+                        voiceState = previous
+                        setMicVisual(voiceState)
+                    }
                     return
                 }
-                val previous = voiceState
                 voiceState = if (previous == VoiceState.IDLE) VoiceState.RECORDING else VoiceState.PROCESSING
                 setMicVisual(voiceState)
                 log("$TAG Gboard mic gesture UP -> betterFlow toggle, optimistic=${voiceState.wireName}")
@@ -516,7 +521,7 @@ class BetterFlowXposedModule(
         mic.contentDescription = when (state) {
             VoiceState.IDLE -> micOriginalContentDescription ?: mic.contentDescription
             VoiceState.RECORDING -> "betterFlow recording; tap to finish"
-            VoiceState.PROCESSING -> "betterFlow transcribing"
+            VoiceState.PROCESSING -> "betterFlow transcribing; tap to cancel"
         }
         mic.invalidate()
     }

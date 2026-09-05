@@ -57,6 +57,7 @@ private fun SettingsScreen() {
     var backend by remember { mutableStateOf(Prefs.backend(context)) }
     var gboardMicEnabled by remember { mutableStateOf(Prefs.gboardMicEnabled(context)) }
     var bubbleEnabled by remember { mutableStateOf(Prefs.bubbleVisible(context)) }
+    var legacyTranscription by remember { mutableStateOf(Prefs.legacyTranscription(context)) }
     var email by remember { mutableStateOf(session?.email.orEmpty()) }
     var password by remember { mutableStateOf("") }
     var sessionJson by remember { mutableStateOf("") }
@@ -77,7 +78,7 @@ private fun SettingsScreen() {
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Voice trigger", style = MaterialTheme.typography.titleMedium)
-                Text("Gboard mic is the primary trigger. It is matched semantically, so floating, split, full-width, rotation, and ordinary toolbar movement do not rely on fixed coordinates.")
+                Text("Gboard mic is the primary trigger. Realtime mode streams 16 kHz mono PCM16 to Wispr in 100 ms chunks. The mic is matched semantically, so floating, split, full-width, rotation, and ordinary toolbar movement do not rely on fixed coordinates.")
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -96,6 +97,24 @@ private fun SettingsScreen() {
                         },
                     )
                 }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Legacy transcription engine")
+                        Text("Send the completed WAV over the old HTTP endpoint instead of streaming. Streaming mode still falls back here automatically if the live stream fails.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(
+                        checked = legacyTranscription,
+                        onCheckedChange = { enabled ->
+                            legacyTranscription = enabled
+                            Prefs.setLegacyTranscription(context, enabled)
+                            status = if (enabled) "Legacy whole-file transcription enabled" else "Realtime streaming enabled"
+                        },
+                    )
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,

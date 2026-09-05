@@ -20,6 +20,7 @@ object Prefs {
     private const val KEY_BUBBLE_VISIBLE = "bubble_visible"
     private const val KEY_GBOARD_MIC_ENABLED = "gboard_mic_enabled"
     private const val KEY_VOICE_TRIGGER_V2_MIGRATED = "voice_trigger_v2_migrated"
+    private const val KEY_LEGACY_TRANSCRIPTION = "legacy_transcription"
 
     private fun prefs(context: Context) = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
@@ -68,6 +69,13 @@ object Prefs {
     fun setGboardMicEnabled(context: Context, enabled: Boolean) {
         ensureVoiceTriggerDefaults(context)
         prefs(context).edit().putBoolean(KEY_GBOARD_MIC_ENABLED, enabled).apply()
+    }
+
+    fun legacyTranscription(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_LEGACY_TRANSCRIPTION, false)
+
+    fun setLegacyTranscription(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_LEGACY_TRANSCRIPTION, enabled).apply()
     }
 }
 

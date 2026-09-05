@@ -6,10 +6,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Call
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class WisprClient(context: Context) {
     private val auth = AuthStore(context.applicationContext)
@@ -20,6 +22,7 @@ class WisprClient(context: Context) {
         .callTimeout(150, TimeUnit.SECONDS)
         .build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
+    private val activeTranscriptionCall = AtomicReference<Call?>(null)
 
     suspend fun login(email: String, password: String): WisprSession = withContext(Dispatchers.IO) {
         val payload = JSONObject()
@@ -50,6 +53,7 @@ class WisprClient(context: Context) {
                     "$BASE_URL/llm/api",
                     payload,
                     mapOf("Authorization" to authorization),
+                    trackTranscription = true,
                 )
                 result.optString("text").takeIf { it.isNotBlank() }?.let { return@withContext it }
                 throw IllegalStateException("Wispr returned no text: $result")
@@ -59,6 +63,46 @@ class WisprClient(context: Context) {
             }
         }
         throw lastError ?: IllegalStateException("Wispr transcription failed")
+    }
+
+
+    suspend fun freshAccessToken(): String = withContext(Dispatchers.IO) { freshSession().accessToken }
+
+    suspend fun transcribeLegacyPcm(pcm: ByteArray): String {
+        if (pcm.isEmpty()) throw IllegalStateException("No recorded audio")
+        val maxChunkBytes = AudioRecorderController.SAMPLE_RATE *
+            AudioRecorderController.CHANNELS *
+            AudioRecorderController.SAMPLE_WIDTH_BYTES *
+            FALLBACK_MAX_SECONDS
+        val texts = mutableListOf<String>()
+        var skippedEmpty = 0
+        var offset = 0
+        while (offset < pcm.size) {
+            val end = minOf(pcm.size, offset + maxChunkBytes)
+            val chunk = pcm.copyOfRange(offset, end)
+            try {
+                val text = transcribe(AudioRecorderController.pcmToWav(chunk)).trim()
+                if (text.isNotEmpty()) texts += text else skippedEmpty++
+            } catch (t: IllegalStateException) {
+                if (t.message?.contains("returned no text", ignoreCase = true) == true) {
+                    skippedEmpty++
+                } else {
+                    throw t
+                }
+            }
+            offset = end
+        }
+        if (texts.isEmpty()) {
+            throw IllegalStateException(
+                if (skippedEmpty > 0) "fallback transcription returned empty text"
+                else "fallback transcription had no audio chunks to upload",
+            )
+        }
+        return texts.joinToString("\n")
+    }
+
+    fun cancelActiveTranscription() {
+        activeTranscriptionCall.getAndSet(null)?.cancel()
     }
 
     private fun freshSession(): WisprSession {
@@ -87,18 +131,29 @@ class WisprClient(context: Context) {
         return next
     }
 
-    private fun postJson(url: String, payload: JSONObject, headers: Map<String, String>): JSONObject {
+    private fun postJson(
+        url: String,
+        payload: JSONObject,
+        headers: Map<String, String>,
+        trackTranscription: Boolean = false,
+    ): JSONObject {
         val requestBuilder = Request.Builder()
             .url(url)
             .post(payload.toString().toRequestBody(jsonType))
             .header("Accept", "application/json")
             .header("User-Agent", "betterFlow/${BuildConfig.VERSION_NAME} (Android)")
         headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-        client.newCall(requestBuilder.build()).execute().use { response ->
-            val text = response.body.string()
-            val json = if (text.isBlank()) JSONObject() else JSONObject(text)
-            if (!response.isSuccessful) throw HttpStatusException(response.code, json.toString())
-            return json
+        val call = client.newCall(requestBuilder.build())
+        if (trackTranscription) activeTranscriptionCall.set(call)
+        try {
+            call.execute().use { response ->
+                val text = response.body.string()
+                val json = if (text.isBlank()) JSONObject() else JSONObject(text)
+                if (!response.isSuccessful) throw HttpStatusException(response.code, json.toString())
+                return json
+            }
+        } finally {
+            if (trackTranscription) activeTranscriptionCall.compareAndSet(call, null)
         }
     }
 
@@ -107,6 +162,7 @@ class WisprClient(context: Context) {
     companion object {
         private const val BASE_URL = "https://api.wisprflow.ai"
         private const val SUPABASE_URL = "https://dodjkfqhwrzqjwkfnthl.supabase.co"
+        private const val FALLBACK_MAX_SECONDS = 355
         // Supabase anon keys are public client identifiers embedded in the official client; user tokens are never compiled in.
         private const val SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRvZGprZnFod3J6cWp3a2ZudGhsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTk4ODQzMDcsImV4cCI6MjAzNTQ2MDMwN30.h6EeQ_6kqFeznH25icVUX0Szn9__kc8HoSXAsxxBWG8"
     }

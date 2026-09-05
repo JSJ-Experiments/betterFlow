@@ -15,6 +15,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -22,26 +23,48 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.Toast
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
+import kotlin.math.max
 
 class OverlayService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val recorder = AudioRecorderController()
     private lateinit var wispr: WisprClient
+    private lateinit var streaming: WisprStreamingClient
     private lateinit var injector: InputInjector
     private lateinit var windowManager: WindowManager
     private var bubble: View? = null
     private var params: WindowManager.LayoutParams? = null
     private var state = BubbleState.IDLE
+    private var operationGeneration = 0L
+    private var legacyForCurrentRecording = false
+    private var currentPcm = ByteArray(0)
+    private var processingJob: Job? = null
+    private var streamWorker: Job? = null
+    @Volatile private var activeStream: WisprStreamingClient.Session? = null
+    @Volatile private var streamingFailure: Throwable? = null
+    @Volatile private var streamStopRequested = false
+    @Volatile private var streamCaptureFinalized = false
+    private var streamQueue: ArrayBlockingQueue<ByteArray>? = null
+    private val streamQueueEnabled = AtomicBoolean(false)
+    private val streamQueuedBytes = AtomicLong(0L)
 
     override fun onCreate() {
         super.onCreate()
         wispr = WisprClient(applicationContext)
+        streaming = WisprStreamingClient(applicationContext)
         injector = InputInjector(applicationContext)
         windowManager = getSystemService(WindowManager::class.java)
         ensureNotificationChannel()
@@ -65,7 +88,14 @@ class OverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        if (recorder.isRecording()) runCatching { recorder.stopAndGetWav() }
+        operationGeneration++
+        streamQueueEnabled.set(false)
+        streamStopRequested = true
+        activeStream?.cancel("betterFlow service destroyed")
+        streamWorker?.cancel()
+        processingJob?.cancel()
+        wispr.cancelActiveTranscription()
+        if (recorder.isRecording()) runCatching { recorder.stopAndDiscard() }
         state = BubbleState.IDLE
         VoiceRuntimeState.wireName = BubbleState.IDLE.wireName
         broadcastVoiceState(BubbleState.IDLE)
@@ -175,8 +205,11 @@ class OverlayService : Service() {
     }
 
     private fun toggleRecording() {
-        if (state == BubbleState.PROCESSING) return
-        if (recorder.isRecording()) stopAndTranscribe() else startRecording()
+        when (state) {
+            BubbleState.IDLE -> startRecording()
+            BubbleState.RECORDING -> stopRecording()
+            BubbleState.PROCESSING -> cancelProcessing()
+        }
     }
 
     private fun startRecording() {
@@ -185,38 +218,252 @@ class OverlayService : Service() {
             startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             return
         }
+
+        operationGeneration++
+        val generation = operationGeneration
+        legacyForCurrentRecording = Prefs.legacyTranscription(this)
+        currentPcm = ByteArray(0)
+        streamingFailure = null
+        streamStopRequested = false
+        streamCaptureFinalized = false
+        streamQueueEnabled.set(false)
+        streamQueuedBytes.set(0L)
+        streamQueue = null
+        processingJob?.cancel()
+        processingJob = null
         updateState(BubbleState.RECORDING)
+
         try {
-            recorder.start()
+            if (legacyForCurrentRecording) {
+                recorder.start()
+                Log.i(TAG, "recording started with legacy whole-file transcription")
+            } else {
+                startStreamingRecording(generation)
+            }
         } catch (t: Throwable) {
+            Log.e(TAG, "microphone start failed", t)
+            cancelStreamOnly("microphone start failed")
             Toast.makeText(this, "Microphone start failed: ${t.message}", Toast.LENGTH_LONG).show()
             updateState(BubbleState.IDLE)
         }
     }
 
-    private fun stopAndTranscribe() {
+    private fun startStreamingRecording(generation: Long) {
+        val queue = ArrayBlockingQueue<ByteArray>(STREAM_QUEUE_CAPACITY)
+        streamQueue = queue
+        streamQueueEnabled.set(true)
+        streamWorker = scope.launch(Dispatchers.IO) {
+            var session: WisprStreamingClient.Session? = null
+            try {
+                session = streaming.open(
+                    onPartial = { partial ->
+                        Log.d(TAG, "Wispr partial: ${partial.take(160)}")
+                    },
+                )
+                if (generation != operationGeneration) {
+                    session.cancel("stale recording")
+                    return@launch
+                }
+                activeStream = session
+                Log.i(TAG, "Wispr gRPC stream connected; feeding 100 ms PCM chunks")
+
+                while (true) {
+                    val chunk = queue.poll(100, TimeUnit.MILLISECONDS)
+                    if (chunk != null) session.sendAudio(chunk)
+                    if (streamStopRequested && streamCaptureFinalized && queue.isEmpty()) {
+                        // If capture stopped between AudioRecord reads, its final sub-100ms
+                        // PCM tail may not have entered the live queue. Send exactly the
+                        // unqueued suffix before commit so the wire audio remains complete.
+                        var offset = streamQueuedBytes.get().coerceAtMost(currentPcm.size.toLong()).toInt()
+                        while (offset < currentPcm.size) {
+                            val end = minOf(currentPcm.size, offset + AudioRecorderController.STREAM_CHUNK_BYTES)
+                            session.sendAudio(currentPcm.copyOfRange(offset, end))
+                            offset = end
+                        }
+                        break
+                    }
+                }
+                session.commit()
+                Log.i(TAG, "Wispr gRPC commit sent")
+                val result = session.awaitResult()
+                withContext(Dispatchers.Main.immediate) {
+                    if (generation == operationGeneration && state == BubbleState.PROCESSING) {
+                        handleStreamingResult(result, generation)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                session?.cancel("stream coroutine cancelled")
+                throw cancelled
+            } catch (t: Throwable) {
+                session?.cancel("stream failed")
+                streamingFailure = t
+                streamQueueEnabled.set(false)
+                Log.w(TAG, "Wispr streaming failed: ${t.message}", t)
+                withContext(Dispatchers.Main.immediate) {
+                    if (generation == operationGeneration && state == BubbleState.PROCESSING) {
+                        startLegacyFallback(currentPcm, generation, "streaming failed: ${t.message}")
+                    }
+                }
+            } finally {
+                if (activeStream === session) activeStream = null
+            }
+        }
+
+        recorder.start(
+            onPcmChunk = { chunk ->
+                if (!streamQueueEnabled.get()) return@start
+                try {
+                    var queued = false
+                    while (streamQueueEnabled.get() && !queued) {
+                        queued = queue.offer(chunk, 100, TimeUnit.MILLISECONDS)
+                    }
+                    if (queued) streamQueuedBytes.addAndGet(chunk.size.toLong())
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            },
+            chunkBytes = AudioRecorderController.STREAM_CHUNK_BYTES,
+        )
+        Log.i(TAG, "recording started: 16 kHz mono PCM16, 100 ms chunks")
+    }
+
+    private fun stopRecording() {
+        if (state != BubbleState.RECORDING) return
         updateState(BubbleState.PROCESSING)
-        val wav = recorder.stopAndGetWav()
-        if (wav.size <= 44) {
+        streamQueueEnabled.set(false)
+        streamStopRequested = true
+        currentPcm = recorder.stopAndGetPcm()
+        streamCaptureFinalized = true
+
+        if (currentPcm.isEmpty()) {
+            cancelStreamOnly("empty recording")
             updateState(BubbleState.IDLE)
             return
         }
-        scope.launch {
-            try {
-                val text = wispr.transcribe(wav)
-                val result = injector.inject(text)
-                val message = if (result.success) {
-                    "Inserted via ${result.backend.wireName}"
-                } else {
-                    "Could not insert automatically; transcript is in the clipboard if fallback ran"
-                }
-                Toast.makeText(this@OverlayService, message, Toast.LENGTH_SHORT).show()
-            } catch (t: Throwable) {
-                Toast.makeText(this@OverlayService, "betterFlow failed: ${t.message}", Toast.LENGTH_LONG).show()
-            } finally {
-                updateState(BubbleState.IDLE)
+
+        if (legacyForCurrentRecording) {
+            startLegacyFallback(currentPcm, operationGeneration, "legacy mode")
+            return
+        }
+
+        streamingFailure?.let { failure ->
+            cancelStreamOnly("stream already failed")
+            startLegacyFallback(currentPcm, operationGeneration, "streaming failed: ${failure.message}")
+            return
+        }
+        // The stream worker drains all queued PCM, sends the separate commit frame,
+        // waits for the final response, then calls handleStreamingResult().
+    }
+
+    private fun handleStreamingResult(result: WisprStreamingClient.Result, generation: Long) {
+        if (generation != operationGeneration || state != BubbleState.PROCESSING) return
+        val expectedSeconds = currentPcm.size.toDouble() /
+            (AudioRecorderController.SAMPLE_RATE * AudioRecorderController.CHANNELS * AudioRecorderController.SAMPLE_WIDTH_BYTES)
+        val receivedSeconds = result.audioDurationSeconds ?: result.audioReceivedSeconds?.toDouble()
+        if (receivedSeconds != null) {
+            val missingSeconds = expectedSeconds - receivedSeconds
+            if (missingSeconds > max(0.75, expectedSeconds * 0.10)) {
+                Log.w(TAG, "stream missed ${"%.2f".format(missingSeconds)}s; using legacy fallback")
+                startLegacyFallback(
+                    currentPcm,
+                    generation,
+                    "streaming appears to have missed ${"%.1f".format(missingSeconds)}s of audio",
+                )
+                return
             }
         }
+        startTranscriptDelivery(result.text, generation, "streaming")
+    }
+
+    private fun startLegacyFallback(pcm: ByteArray, generation: Long, reason: String) {
+        if (generation != operationGeneration || state != BubbleState.PROCESSING) return
+        Log.i(TAG, "starting legacy HTTP fallback: $reason")
+        processingJob?.cancel()
+        processingJob = scope.launch {
+            try {
+                val transcript = wispr.transcribeLegacyPcm(pcm)
+                if (generation != operationGeneration || state != BubbleState.PROCESSING) return@launch
+                deliverTranscript(transcript, generation, "legacy_http")
+            } catch (_: CancellationException) {
+                // User cancellation is intentionally silent.
+            } catch (t: Throwable) {
+                if (generation != operationGeneration || state != BubbleState.PROCESSING) return@launch
+                Log.e(TAG, "legacy transcription failed", t)
+                Toast.makeText(this@OverlayService, "betterFlow failed: ${t.message}", Toast.LENGTH_LONG).show()
+                finishOperation(generation)
+            }
+        }
+    }
+
+    private fun startTranscriptDelivery(text: String, generation: Long, source: String) {
+        processingJob?.cancel()
+        processingJob = scope.launch {
+            deliverTranscript(text, generation, source)
+        }
+    }
+
+    private suspend fun deliverTranscript(text: String, generation: Long, source: String) {
+        if (generation != operationGeneration || state != BubbleState.PROCESSING) return
+        try {
+            val result = injector.inject(text)
+            if (generation != operationGeneration || state != BubbleState.PROCESSING) return
+            val message = if (result.success) {
+                "Inserted via ${result.backend.wireName} ($source)"
+            } else {
+                "Could not insert automatically; transcript is in the clipboard if fallback ran"
+            }
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        } catch (_: CancellationException) {
+            return
+        } catch (t: Throwable) {
+            if (generation == operationGeneration && state == BubbleState.PROCESSING) {
+                Toast.makeText(this, "betterFlow failed: ${t.message}", Toast.LENGTH_LONG).show()
+            }
+        } finally {
+            if (generation == operationGeneration && state == BubbleState.PROCESSING) {
+                finishOperation(generation)
+            }
+        }
+    }
+
+    private fun cancelProcessing() {
+        if (state != BubbleState.PROCESSING) return
+        operationGeneration++
+        streamQueueEnabled.set(false)
+        streamStopRequested = true
+        streamCaptureFinalized = true
+        activeStream?.cancel("cancelled by user while processing")
+        activeStream = null
+        streamWorker?.cancel()
+        streamWorker = null
+        processingJob?.cancel()
+        processingJob = null
+        wispr.cancelActiveTranscription()
+        streamQueue = null
+        streamingFailure = null
+        currentPcm = ByteArray(0)
+        Log.i(TAG, "processing cancelled by user")
+        updateState(BubbleState.IDLE)
+    }
+
+    private fun cancelStreamOnly(reason: String) {
+        streamQueueEnabled.set(false)
+        streamStopRequested = true
+        streamCaptureFinalized = true
+        activeStream?.cancel(reason)
+        activeStream = null
+        streamWorker?.cancel()
+        streamWorker = null
+        streamQueue = null
+    }
+
+    private fun finishOperation(generation: Long) {
+        if (generation != operationGeneration) return
+        cancelStreamOnly("operation complete")
+        processingJob = null
+        streamingFailure = null
+        currentPcm = ByteArray(0)
+        updateState(BubbleState.IDLE)
     }
 
     private fun updateState(next: BubbleState) {
@@ -317,5 +564,7 @@ class OverlayService : Service() {
         const val ACTION_STOP = "com.jadenjsj.betterflow.action.STOP"
         private const val CHANNEL_ID = "betterflow-overlay"
         private const val NOTIFICATION_ID = 1206
+        private const val STREAM_QUEUE_CAPACITY = 128
+        private const val TAG = "betterFlow/Voice"
     }
 }

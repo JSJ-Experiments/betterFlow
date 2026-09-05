@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package flow_api.v1;
+
+option java_package = "com.jadenjsj.betterflow.proto";
+option java_multiple_files = true;
+option java_outer_classname = "WisprFlowStreamingProto";
+
+import "google/protobuf/duration.proto";
+
+message Version {
+  int32 major = 1;
+  int32 minor = 2;
+  int32 patch = 3;
+}
+
+message Client {
+  string name = 1;
+  int32 platform = 2;
+  Version version = 3;
+}
+
+message Metadata {
+  string user_id = 1;
+  string session_id = 2;
+  string request_id = 3;
+  int32 audio_encoding = 4;
+  int32 environment = 5;
+  Client client = 6;
+  bool debug = 7;
+  string referral_code = 8;
+  bool always_wait_scribe = 9;
+}
+
+message StaticVocabulary {}
+
+message Replacements {}
+
+message StyleConfig {}
+
+message Preferences {
+  repeated int32 language = 2;
+  StaticVocabulary vocabulary = 3;
+  Replacements replacements = 4;
+  StyleConfig style_config = 5;
+}
+
+message Text {
+  string content = 1;
+  int32 num_tokens = 2;
+  repeated int32 languages = 3;
+}
+
+message UserActions {
+  bool check_mic = 1;
+  int32 check_language = 2;
+}
+
+message CandidateBeam {}
+
+message State {
+  message Progress {}
+
+  Progress progress = 1;
+  Text raw_text = 2;
+  Text formatted_text = 3;
+  int32 confidence = 4;
+  UserActions user_actions = 5;
+  repeated CandidateBeam candidate_beams = 6;
+  float audio_snr = 7;
+  float audio_volume = 8;
+  float mean_alignment_score = 9;
+}
+
+message Init {
+  Metadata metadata = 1;
+  Preferences preferences = 2;
+  State state = 3;
+}
+
+message Context {}
+
+message AudioPackets {
+  repeated bytes items = 1;
+}
+
+message AudioFile {
+  bytes data = 1;
+}
+
+message Payload {
+  oneof audio {
+    AudioPackets audio_packets = 1;
+    AudioFile audio_file = 2;
+  }
+}
+
+enum Commit {
+  COMMIT_UNSPECIFIED = 0;
+  COMMIT_TRUE = 1;
+}
+
+message Request {
+  Init init = 1;
+  Context context = 2;
+  Payload payload = 3;
+  Commit commit = 4;
+}
+
+message Heartbeat {
+  float audio_received_seconds = 1;
+  bool commit_ack = 2;
+}
+
+message ResponseTime {}
+
+message TranscriptionStats {}
+
+message Transcription {
+  string html = 1;
+  string plaintext = 2;
+  int32 num_tokens = 3;
+  repeated int32 languages = 4;
+  float confidence = 5;
+  bool language_detection_low_confidence = 6;
+}
+
+message Result {
+  Transcription output = 1;
+  google.protobuf.Duration audio_duration = 2;
+  ResponseTime response_time = 3;
+  int32 signature_status = 4;
+  int32 status = 5;
+  TranscriptionStats stats = 6;
+}
+
+message Response {
+  Result result = 1;
+  State state = 2;
+  repeated State all_states = 3;
+  Heartbeat heartbeat = 4;
+}
+
+service TranscriptionService {
+  rpc TranscribeStream(stream Request) returns (stream Response);
+}

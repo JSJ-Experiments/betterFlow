@@ -60,6 +60,7 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          WISPR_BASETEN_API_KEY: ${{ secrets.WISPR_BASETEN_API_KEY }}
         run: ./gradlew --no-daemon :app:assembleRelease
 
       - name: Package KernelSU and hot-update payloads
