@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">betterFlow</string>
+    <string name="xposed_description">Direct text insertion bridge for betterFlow voice typing.</string>
+    <string name="notification_channel">betterFlow overlay</string>
+    <string name="notification_idle">betterFlow bubble is ready</string>
+    <string name="notification_recording">Listening… tap the bubble to finish</string>
+    <string name="notification_processing">Transcribing…</string>
+</resources>

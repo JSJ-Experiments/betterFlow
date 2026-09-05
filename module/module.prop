@@ -1,0 +1,7 @@
+id=betterflow
+name=betterFlow
+version=0.1.0-dev
+versionCode=1
+author=JadenJSJ
+description=Root-persistent floating Wispr voice typing with selectable LSPosed/InputConnection or root-paste insertion. Action = hot update.
+updateJson=https://github.com/JSJ-Experiments/betterFlow/releases/latest/download/update.json

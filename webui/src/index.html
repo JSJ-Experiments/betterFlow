@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>betterFlow</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>betterFlow</h1><p>Hot-reloadable voice typing runtime</p></div>
+      <span id="dot" class="dot"></span>
+    </header>
+    <section class="card">
+      <h2>Status</h2>
+      <div class="grid">
+        <div><small>Runtime</small><strong id="version">—</strong></div>
+        <div><small>Watchdog</small><strong id="watchdog">—</strong></div>
+        <div><small>App</small><strong id="app">—</strong></div>
+        <div><small>Auto update</small><strong id="auto">—</strong></div>
+      </div>
+      <button id="refresh" class="secondary">Refresh</button>
+    </section>
+    <section class="card">
+      <h2>Update</h2>
+      <p>Fetch, verify, install, and restart the latest GitHub runtime without rebooting the phone.</p>
+      <button id="update">Hot update now</button>
+      <pre id="output"></pre>
+    </section>
+    <section class="card">
+      <h2>Controls</h2>
+      <div class="row">
+        <button id="settings" class="secondary">Open app settings</button>
+        <button id="start" class="secondary">Start bubble</button>
+        <button id="stop" class="danger">Stop bubble</button>
+      </div>
+      <div class="row">
+        <button id="autoOn" class="secondary">Auto-update on</button>
+        <button id="autoOff" class="secondary">Auto-update off</button>
+      </div>
+    </section>
+    <footer>KernelSU's Action button runs the same hot updater.</footer>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

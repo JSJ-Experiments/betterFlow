@@ -1,0 +1,98 @@
+name: Blacksmith Android build and release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: betterflow-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    env:
+      BETTERFLOW_VERSION_NAME: 0.1.${{ github.run_number }}
+      BETTERFLOW_VERSION_CODE: ${{ github.run_number }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Build KernelSU WebUI
+        working-directory: webui
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+
+      - name: Prepare signing key
+        if: github.event_name != 'pull_request'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/betterflow-release.jks"
+          chmod 600 "$RUNNER_TEMP/betterflow-release.jks"
+
+      - name: Build APK on Blacksmith
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ github.event_name != 'pull_request' && format('{0}/betterflow-release.jks', runner.temp) || '' }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Package KernelSU and hot-update payloads
+        run: ./tools/package-release.sh
+
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: betterflow-${{ github.run_number }}
+          path: |
+            release/generated/betterflow.apk
+            release/generated/betterflow-module.zip
+            release/generated/betterflow-runtime.zip
+            release/generated/runtime.env
+            release/generated/update.json
+            release/generated/checksums.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish latest GitHub release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" \
+            release/generated/betterflow.apk \
+            release/generated/betterflow-module.zip \
+            release/generated/betterflow-runtime.zip \
+            release/generated/runtime.env \
+            release/generated/update.json \
+            release/generated/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "betterFlow ${BETTERFLOW_VERSION_NAME}" \
+            --notes "Automated Blacksmith build for commit ${GITHUB_SHA}. Normal runtime updates apply without reboot through the KernelSU Action button." \
+            --latest

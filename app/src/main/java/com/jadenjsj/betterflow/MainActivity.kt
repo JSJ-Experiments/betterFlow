@@ -1,0 +1,200 @@
+package com.jadenjsj.betterflow
+
+import android.Manifest
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.provider.Settings
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent { MaterialTheme { SettingsScreen() } }
+    }
+}
+
+@Composable
+private fun SettingsScreen() {
+    val context = LocalContext.current
+    val auth = remember { AuthStore(context) }
+    val client = remember { WisprClient(context) }
+    val coroutine = rememberCoroutineScope()
+    var session by remember { mutableStateOf(auth.load()) }
+    var backend by remember { mutableStateOf(Prefs.backend(context)) }
+    var email by remember { mutableStateOf(session?.email.orEmpty()) }
+    var password by remember { mutableStateOf("") }
+    var sessionJson by remember { mutableStateOf("") }
+    var status by remember { mutableStateOf("Ready") }
+    var rootStatus by remember { mutableStateOf("Not checked") }
+
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        status = if (result.values.all { it }) "Runtime permissions granted" else "Some runtime permissions were denied"
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("betterFlow", style = MaterialTheme.typography.headlineMedium)
+        Text("Voice typing bubble + root/LSPosed text insertion. Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}).")
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Runtime", style = MaterialTheme.typography.titleMedium)
+                Text("Overlay permission: ${if (Settings.canDrawOverlays(context)) "granted" else "missing"}")
+                Text("Root: $rootStatus")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        val permissions = buildList {
+                            add(Manifest.permission.RECORD_AUDIO)
+                            if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+                        }.toTypedArray()
+                        permissionLauncher.launch(permissions)
+                    }) { Text("Grant runtime perms") }
+                    Button(onClick = {
+                        context.startActivity(
+                            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                    }) { Text("Overlay settings") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        context.startForegroundService(Intent(context, OverlayService::class.java).setAction(OverlayService.ACTION_SHOW))
+                        status = "Overlay service started"
+                    }) { Text("Start bubble") }
+                    Button(onClick = {
+                        context.stopService(Intent(context, OverlayService::class.java))
+                        status = "Overlay service stopped"
+                    }) { Text("Stop bubble") }
+                    TextButton(onClick = {
+                        coroutine.launch { rootStatus = if (RootShell.hasRoot()) "available" else "not granted" }
+                    }) { Text("Check root") }
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Text insertion", style = MaterialTheme.typography.titleMedium)
+                Text("Auto prefers direct InputConnection through LSPosed and falls back to clipboard + root KEYCODE_PASTE.")
+                InputBackend.entries.forEach { option ->
+                    Row {
+                        RadioButton(
+                            selected = backend == option,
+                            onClick = {
+                                backend = option
+                                Prefs.setBackend(context, option)
+                            },
+                        )
+                        Text(
+                            when (option) {
+                                InputBackend.AUTO -> "Auto (recommended)"
+                                InputBackend.LSPOSED -> "LSPosed InputConnection only"
+                                InputBackend.CLIPBOARD_PASTE -> "Clipboard + root paste"
+                            },
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                    }
+                }
+                Text("For direct mode, enable this APK as an LSPosed module and scope it to your keyboard (Gboard is predeclared). Modern LSPosed can hot-reload the module when the APK is updated.")
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Wispr authentication", style = MaterialTheme.typography.titleMedium)
+                Text(if (session != null) "Signed in as ${session?.email}" else "Not signed in")
+                OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text("Email") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("Password (not stored)") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Button(
+                    onClick = {
+                        coroutine.launch {
+                            status = "Signing in…"
+                            try {
+                                session = client.login(email.trim(), password)
+                                password = ""
+                                status = "Wispr session saved"
+                            } catch (t: Throwable) {
+                                status = "Login failed: ${t.message}"
+                            }
+                        }
+                    },
+                    enabled = email.isNotBlank() && password.isNotBlank(),
+                ) { Text("Email login") }
+
+                Spacer(Modifier.height(4.dp))
+                Text("Or paste the existing ~/.config/wispr-linux/session.json from the dev machine:")
+                OutlinedTextField(
+                    value = sessionJson,
+                    onValueChange = { sessionJson = it },
+                    label = { Text("Session JSON") },
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        try {
+                            session = auth.importJson(sessionJson)
+                            sessionJson = ""
+                            status = "Imported Wispr session"
+                        } catch (t: Throwable) {
+                            status = "Import failed: ${t.message}"
+                        }
+                    }, enabled = sessionJson.isNotBlank()) { Text("Import session") }
+                    TextButton(onClick = {
+                        auth.clear()
+                        session = null
+                        status = "Wispr session cleared"
+                    }) { Text("Clear") }
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(14.dp)) {
+                Text("Status", style = MaterialTheme.typography.titleMedium)
+                Text(status)
+            }
+        }
+    }
+}

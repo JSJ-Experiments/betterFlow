@@ -1,0 +1,17 @@
+.gradle/
+.idea/
+*.iml
+local.properties
+**/build/
+webui/node_modules/
+webui/dist/
+module/webroot/*
+!module/webroot/.gitkeep
+release/generated/
+.private/
+_reference/
+*.jks
+*.keystore
+*.apk
+*.zip
+.DS_Store
