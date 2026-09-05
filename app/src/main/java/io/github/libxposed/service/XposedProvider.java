@@ -5,7 +5,9 @@ import android.content.ContentValues;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Binder;
 import android.os.IBinder;
+import android.os.Process;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -52,6 +54,11 @@ public final class XposedProvider extends ContentProvider {
     @Override
     public Bundle call(@NonNull String method, @Nullable String arg, @Nullable Bundle extras) {
         if (method.equals(IXposedService.SEND_BINDER) && extras != null) {
+            final int callingUid = Binder.getCallingUid();
+            if (callingUid != Process.SYSTEM_UID && callingUid != Process.ROOT_UID) {
+                Log.w(TAG, "rejecting Xposed binder delivery from uid=" + callingUid);
+                return null;
+            }
             IBinder binder = extras.getBinder("binder");
             if (binder != null) {
                 Log.d(TAG, "binder received: " + binder);
