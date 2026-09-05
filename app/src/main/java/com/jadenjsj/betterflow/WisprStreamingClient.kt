@@ -109,6 +109,10 @@ class WisprStreamingClient(context: Context) {
                             val duration = response.result.audioDuration
                             latestAudioDurationSeconds = duration.seconds.toDouble() + duration.nanos.toDouble() / 1_000_000_000.0
                         }
+                        if (output.plaintext.isNotBlank()) {
+                            Log.i(TAG, "Wispr final result received; completing without waiting for stream close")
+                            finishSuccessfully(output.plaintext)
+                        }
                     }
                 }
 
@@ -118,24 +122,15 @@ class WisprStreamingClient(context: Context) {
                 }
 
                 override fun onCompleted() {
-                    if (!terminal.compareAndSet(false, true)) return
+                    if (terminal.get()) return
                     val text = latestPlaintext.ifBlank {
                         latestFormattedText ?: latestRawText.orEmpty()
                     }
                     if (text.isBlank()) {
-                        result.completeExceptionally(IllegalStateException("Wispr streaming transcription returned no text"))
+                        finishExceptionally(IllegalStateException("Wispr streaming transcription returned no text"))
                     } else {
-                        result.complete(
-                            Result(
-                                text = text,
-                                rawText = latestRawText,
-                                formattedText = latestFormattedText,
-                                audioDurationSeconds = latestAudioDurationSeconds,
-                                audioReceivedSeconds = latestAudioReceivedSeconds,
-                            ),
-                        )
+                        finishSuccessfully(text)
                     }
-                    channel.shutdown()
                 }
             }
             Log.i(TAG, "starting TranscriptionService/TranscribeStream")
@@ -183,6 +178,20 @@ class WisprStreamingClient(context: Context) {
                 if (terminal.get()) return
                 requestObserver?.onNext(request)
             }
+        }
+
+        private fun finishSuccessfully(text: String) {
+            if (!terminal.compareAndSet(false, true)) return
+            result.complete(
+                Result(
+                    text = text,
+                    rawText = latestRawText,
+                    formattedText = latestFormattedText,
+                    audioDurationSeconds = latestAudioDurationSeconds,
+                    audioReceivedSeconds = latestAudioReceivedSeconds,
+                ),
+            )
+            channel.shutdown()
         }
 
         private fun finishExceptionally(t: Throwable) {

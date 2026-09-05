@@ -31,6 +31,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -255,11 +256,13 @@ class OverlayService : Service() {
         streamWorker = scope.launch(Dispatchers.IO) {
             var session: WisprStreamingClient.Session? = null
             try {
-                session = streaming.open(
-                    onPartial = { partial ->
-                        Log.d(TAG, "Wispr partial: ${partial.take(160)}")
-                    },
-                )
+                session = withTimeoutOrNull(STREAM_OPEN_TIMEOUT_MS) {
+                    streaming.open(
+                        onPartial = { partial ->
+                            Log.d(TAG, "Wispr partial: ${partial.take(160)}")
+                        },
+                    )
+                } ?: throw IllegalStateException("Wispr gRPC startup timed out")
                 if (generation != operationGeneration) {
                     session.cancel("stale recording")
                     return@launch
@@ -285,7 +288,9 @@ class OverlayService : Service() {
                 }
                 session.commit()
                 Log.i(TAG, "Wispr gRPC commit sent")
-                val result = session.awaitResult()
+                val result = withTimeoutOrNull(STREAM_RESULT_TIMEOUT_MS) {
+                    session.awaitResult()
+                } ?: throw IllegalStateException("Wispr gRPC timed out waiting for final result")
                 withContext(Dispatchers.Main.immediate) {
                     if (generation == operationGeneration && state == BubbleState.PROCESSING) {
                         handleStreamingResult(result, generation)
@@ -566,6 +571,8 @@ class OverlayService : Service() {
         private const val CHANNEL_ID = "betterflow-overlay"
         private const val NOTIFICATION_ID = 1206
         private const val STREAM_QUEUE_CAPACITY = 128
+        private const val STREAM_OPEN_TIMEOUT_MS = 20_000L
+        private const val STREAM_RESULT_TIMEOUT_MS = 30_000L
         private const val TAG = "betterFlow/Voice"
     }
 }

@@ -77,28 +77,37 @@ class AudioRecorderController {
         }
     }
 
-    @Synchronized
     fun stopAndGetPcm(): ByteArray {
-        if (!recording.getAndSet(false)) return pcm.toByteArray()
-        val record = audioRecord
+        val record: AudioRecord?
+        val captureWorker: Thread?
+        synchronized(this) {
+            if (!recording.getAndSet(false)) return pcm.toByteArray()
+            record = audioRecord
+            captureWorker = worker
+        }
+
+        // AudioRecord.stop() unblocks READ_BLOCKING. Do not hold this object's
+        // monitor while joining: captureLoop needs the same monitor for its
+        // final PCM write before it can exit.
         try {
             record?.stop()
         } catch (_: Throwable) {
         }
-        worker?.join(1200)
+        captureWorker?.join(1200)
         record?.release()
-        audioRecord = null
-        worker = null
-        return pcm.toByteArray()
+
+        synchronized(this) {
+            if (audioRecord === record) audioRecord = null
+            if (worker === captureWorker) worker = null
+            return pcm.toByteArray()
+        }
     }
 
-    @Synchronized
     fun stopAndGetWav(): ByteArray = pcmToWav(stopAndGetPcm())
 
-    @Synchronized
     fun stopAndDiscard() {
         stopAndGetPcm()
-        pcm = ByteArrayOutputStream()
+        synchronized(this) { pcm = ByteArrayOutputStream() }
     }
 
     fun isRecording(): Boolean = recording.get()
