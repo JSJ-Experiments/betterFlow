@@ -290,7 +290,7 @@ class BetterFlowXposedModule(
     private fun startHookRecording(service: InputMethodService) {
         if (hookWispr == null) prepareHookWispr()
         val authAvailable = runCatching {
-            getRemotePreferences(REMOTE_AUTH_GROUP).getString(KEY_ACCESS, null)?.isNotBlank() == true
+            getRemotePreferences(REMOTE_AUTH_GROUP)?.getString(KEY_ACCESS, null)?.isNotBlank() == true
         }.getOrDefault(false)
         if (!authAvailable) {
             log("$TAG cannot record: Wispr auth has not been synced to LSPosed remote prefs")
