@@ -17,6 +17,7 @@ object Prefs {
     private const val KEY_BACKEND = "input_backend"
     private const val KEY_BUBBLE_X = "bubble_x"
     private const val KEY_BUBBLE_Y = "bubble_y"
+    private const val KEY_BUBBLE_VISIBLE = "bubble_visible"
 
     private fun prefs(context: Context) = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
@@ -33,5 +34,11 @@ object Prefs {
 
     fun setBubblePosition(context: Context, x: Int, y: Int) {
         prefs(context).edit().putInt(KEY_BUBBLE_X, x).putInt(KEY_BUBBLE_Y, y).apply()
+    }
+
+    fun bubbleVisible(context: Context): Boolean = prefs(context).getBoolean(KEY_BUBBLE_VISIBLE, true)
+
+    fun setBubbleVisible(context: Context, visible: Boolean) {
+        prefs(context).edit().putBoolean(KEY_BUBBLE_VISIBLE, visible).apply()
     }
 }

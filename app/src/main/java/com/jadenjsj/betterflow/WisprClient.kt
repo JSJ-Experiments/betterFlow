@@ -11,8 +11,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-class WisprClient(context: Context) {
-    private val auth = AuthStore(context.applicationContext)
+class WisprClient(private val auth: WisprSessionStore) {
+    constructor(context: Context) : this(AuthStore(context.applicationContext))
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)

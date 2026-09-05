@@ -51,6 +51,7 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        aidl = true
     }
 
     packaging {
@@ -59,6 +60,7 @@ android {
 }
 
 dependencies {
+    implementation("androidx.annotation:annotation:1.9.1")
     implementation(libs.activity.compose)
     implementation(libs.coroutines.android)
     implementation(libs.okhttp)

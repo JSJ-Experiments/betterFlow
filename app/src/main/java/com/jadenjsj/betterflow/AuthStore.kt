@@ -11,10 +11,16 @@ data class WisprSession(
     val expiresAt: Long?,
 )
 
-class AuthStore(context: Context) {
-    private val prefs = context.getSharedPreferences("betterflow_auth", Context.MODE_PRIVATE)
+interface WisprSessionStore {
+    fun load(): WisprSession?
+    fun save(session: WisprSession)
+}
 
-    fun load(): WisprSession? {
+class AuthStore(context: Context) : WisprSessionStore {
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences("betterflow_auth", Context.MODE_PRIVATE)
+
+    override fun load(): WisprSession? {
         val access = prefs.getString("access_token", null)?.takeIf { it.isNotBlank() } ?: return null
         return WisprSession(
             email = prefs.getString("email", "wispr-user") ?: "wispr-user",
@@ -24,16 +30,20 @@ class AuthStore(context: Context) {
         )
     }
 
-    fun save(session: WisprSession) {
+    override fun save(session: WisprSession) {
         prefs.edit()
             .putString("email", session.email)
             .putString("access_token", session.accessToken)
             .putString("refresh_token", session.refreshToken)
             .putLong("expires_at", session.expiresAt ?: jwtExpiresAt(session.accessToken) ?: 0L)
             .apply()
+        XposedRemoteAuthSync.sync(session)
     }
 
-    fun clear() = prefs.edit().clear().apply()
+    fun clear() {
+        prefs.edit().clear().apply()
+        XposedRemoteAuthSync.sync(null)
+    }
 
     fun importJson(raw: String): WisprSession {
         val json = JSONObject(raw)

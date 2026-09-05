@@ -14,6 +14,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -43,16 +44,16 @@ class OverlayService : Service() {
         windowManager = getSystemService(WindowManager::class.java)
         ensureNotificationChannel()
         updateForeground(BubbleState.IDLE)
-        showBubble()
+        if (Prefs.bubbleVisible(this)) showBubble(persist = false)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_HIDE -> hideBubble()
-            ACTION_SHOW -> showBubble()
+            ACTION_HIDE -> hideBubble(persist = true)
+            ACTION_SHOW -> showBubble(persist = true)
             ACTION_TOGGLE -> toggleRecording()
             ACTION_STOP -> stopSelf()
-            else -> showBubble()
+            else -> if (Prefs.bubbleVisible(this)) showBubble(persist = false) else hideBubble(persist = false)
         }
         return START_STICKY
     }
@@ -61,13 +62,17 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         if (recorder.isRecording()) runCatching { recorder.stopAndGetWav() }
-        hideBubble()
+        hideBubble(persist = false)
         scope.cancel()
         super.onDestroy()
     }
 
-    private fun showBubble() {
-        if (bubble != null) return
+    private fun showBubble(persist: Boolean = true) {
+        if (persist) Prefs.setBubbleVisible(this, true)
+        if (bubble != null) {
+            updateForeground(state)
+            return
+        }
         val size = dp(58)
         val image = ImageView(this).apply {
             setImageResource(R.drawable.ic_mic)
@@ -106,12 +111,21 @@ class OverlayService : Service() {
                     downX = p.x
                     downY = p.y
                     dragged = false
+                    image.scaleX = 0.84f
+                    image.scaleY = 0.84f
+                    image.alpha = 0.72f
+                    image.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downRawX).toInt()
                     val dy = (event.rawY - downRawY).toInt()
-                    if (abs(dx) > dp(6) || abs(dy) > dp(6)) dragged = true
+                    if (abs(dx) > dp(6) || abs(dy) > dp(6)) {
+                        dragged = true
+                        image.scaleX = 1f
+                        image.scaleY = 1f
+                        updateBubbleVisual(state)
+                    }
                     p.x = downX + dx
                     p.y = downY + dy
                     runCatching { windowManager.updateViewLayout(image, p) }
@@ -119,7 +133,15 @@ class OverlayService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     Prefs.setBubblePosition(this, p.x, p.y)
-                    if (!dragged) toggleRecording()
+                    image.scaleX = 1f
+                    image.scaleY = 1f
+                    if (!dragged) toggleRecording() else updateBubbleVisual(state)
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    image.scaleX = 1f
+                    image.scaleY = 1f
+                    updateBubbleVisual(state)
                     true
                 }
                 else -> false
@@ -131,14 +153,18 @@ class OverlayService : Service() {
         } catch (t: Throwable) {
             bubble = null
             params = null
+            if (persist) Prefs.setBubbleVisible(this, false)
             Toast.makeText(this, "betterFlow cannot draw the bubble: ${t.message}", Toast.LENGTH_LONG).show()
         }
+        updateForeground(state)
     }
 
-    private fun hideBubble() {
+    private fun hideBubble(persist: Boolean = true) {
+        if (persist) Prefs.setBubbleVisible(this, false)
         bubble?.let { runCatching { windowManager.removeView(it) } }
         bubble = null
         params = null
+        updateForeground(state)
     }
 
     private fun toggleRecording() {
@@ -152,9 +178,9 @@ class OverlayService : Service() {
             startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             return
         }
+        updateState(BubbleState.RECORDING)
         try {
             recorder.start()
-            updateState(BubbleState.RECORDING)
         } catch (t: Throwable) {
             Toast.makeText(this, "Microphone start failed: ${t.message}", Toast.LENGTH_LONG).show()
             updateState(BubbleState.IDLE)
@@ -162,12 +188,12 @@ class OverlayService : Service() {
     }
 
     private fun stopAndTranscribe() {
+        updateState(BubbleState.PROCESSING)
         val wav = recorder.stopAndGetWav()
         if (wav.size <= 44) {
             updateState(BubbleState.IDLE)
             return
         }
-        updateState(BubbleState.PROCESSING)
         scope.launch {
             try {
                 val text = wispr.transcribe(wav)
@@ -230,6 +256,13 @@ class OverlayService : Service() {
             BubbleState.RECORDING -> getString(R.string.notification_recording)
             BubbleState.PROCESSING -> getString(R.string.notification_processing)
         }
+        val bubbleVisible = bubble != null
+        val bubbleAction = PendingIntent.getService(
+            this,
+            if (bubbleVisible) 2 else 1,
+            Intent(this, OverlayService::class.java).setAction(if (bubbleVisible) ACTION_HIDE else ACTION_SHOW),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mic)
             .setContentTitle("betterFlow")
@@ -237,6 +270,13 @@ class OverlayService : Service() {
             .setContentIntent(open)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .addAction(
+                Notification.Action.Builder(
+                    R.drawable.ic_mic,
+                    if (bubbleVisible) "Hide floating mic" else "Show floating mic",
+                    bubbleAction,
+                ).build(),
+            )
             .build()
     }
 

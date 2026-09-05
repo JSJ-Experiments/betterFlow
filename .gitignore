@@ -15,3 +15,4 @@ _reference/
 *.apk
 *.zip
 .DS_Store
+.device-test/
