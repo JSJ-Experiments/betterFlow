@@ -8,7 +8,7 @@ OUT=${OUT_DIR:-release/generated}
 REPO=${GITHUB_REPOSITORY:-JSJ-Experiments/betterFlow}
 
 rm -rf "$OUT"
-mkdir -p "$OUT/module" "$OUT/runtime/app" "$OUT/runtime/module-runtime/scripts" "$OUT/runtime/module-runtime/webroot"
+mkdir -p "$OUT/module/payload" "$OUT/runtime/app" "$OUT/runtime/module-runtime/scripts" "$OUT/runtime/module-runtime/webroot"
 cp -a module/. "$OUT/module/"
 rm -rf "$OUT/module/webroot"
 mkdir -p "$OUT/module/webroot"
