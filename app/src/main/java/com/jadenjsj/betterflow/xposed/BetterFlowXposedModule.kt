@@ -1,15 +1,18 @@
 package com.jadenjsj.betterflow.xposed
 
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.ServiceConnection
 import android.graphics.Rect
-import android.net.Uri
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.IBinder
+import android.os.Parcel
 import android.os.ResultReceiver
 import android.view.MotionEvent
 import android.view.View
@@ -69,6 +72,7 @@ class BetterFlowXposedModule(
 
     private fun installReceiver(service: InputMethodService) {
         currentIme = WeakReference(service)
+        if (service.packageName == GBOARD_PACKAGE) bindBridge(service)
         synchronized(receivers) {
             if (receivers.containsKey(service)) return
             val receiver = object : BroadcastReceiver() {
@@ -114,7 +118,10 @@ class BetterFlowXposedModule(
                 runCatching { service.unregisterReceiver(receiver) }
             }
         }
-        if (currentIme?.get() === service) currentIme = null
+        if (currentIme?.get() === service) {
+            unbindBridge(service)
+            currentIme = null
+        }
         micKeyView = null
         micGestureActive = false
     }
@@ -197,23 +204,93 @@ class BetterFlowXposedModule(
         }
     }
 
+    private fun bindBridge(service: InputMethodService) {
+        if (bridgeConnection != null) return
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                bridgeBinder = binder
+                log("$TAG Gboard Binder bridge connected: $name")
+                if (pendingToggle) {
+                    pendingToggle = false
+                    transactToggle()
+                }
+            }
+
+            override fun onServiceDisconnected(name: ComponentName?) {
+                bridgeBinder = null
+                log("$TAG Gboard Binder bridge disconnected: $name")
+            }
+
+            override fun onBindingDied(name: ComponentName?) {
+                bridgeBinder = null
+                log("$TAG Gboard Binder bridge binding died: $name")
+            }
+
+            override fun onNullBinding(name: ComponentName?) {
+                bridgeBinder = null
+                log("$TAG Gboard Binder bridge returned null binding: $name")
+            }
+        }
+        bridgeConnection = connection
+        val intent = Intent()
+            .setClassName(BETTERFLOW_PACKAGE, GBOARD_BRIDGE_SERVICE)
+            .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+        val ok = runCatching {
+            service.bindService(intent, connection, Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT)
+        }.getOrElse {
+            log("$TAG Gboard Binder bridge bind failed: ${it.message}", it)
+            false
+        }
+        if (!ok) {
+            bridgeConnection = null
+            log("$TAG Gboard Binder bridge bind returned false")
+        } else {
+            log("$TAG Gboard Binder bridge binding requested")
+        }
+    }
+
+    private fun unbindBridge(service: InputMethodService) {
+        val connection = bridgeConnection ?: return
+        bridgeConnection = null
+        bridgeBinder = null
+        pendingToggle = false
+        runCatching { service.unbindService(connection) }
+    }
+
+    private fun transactToggle(): Boolean {
+        val binder = bridgeBinder ?: return false
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(GBOARD_BRIDGE_DESCRIPTOR)
+            if (!binder.transact(GBOARD_TRANSACTION_TOGGLE, data, reply, 0)) return false
+            reply.readException()
+            reply.readInt() != 0
+        } catch (t: Throwable) {
+            log("$TAG Gboard Binder transaction failed: ${t.message}", t)
+            bridgeBinder = null
+            false
+        } finally {
+            data.recycle()
+            reply.recycle()
+        }
+    }
+
     private fun triggerBetterFlow() {
         val service = currentIme?.get() ?: run {
             log("$TAG cannot trigger betterFlow: no live IME service")
             return
         }
-        runCatching {
-            val result = service.contentResolver.call(
-                Uri.parse("content://$GBOARD_TRIGGER_AUTHORITY"),
-                GBOARD_TRIGGER_METHOD,
-                null,
-                null,
-            )
-            val ok = result?.getBoolean("ok", false) == true
-            if (!ok) error(result?.getString("error") ?: "provider returned failure")
+        if (transactToggle()) {
+            log("$TAG authenticated Gboard Binder toggle accepted")
+            return
         }
-            .onSuccess { log("$TAG authenticated Gboard provider toggle accepted") }
-            .onFailure { log("$TAG Gboard provider toggle failed: ${it.message}", it) }
+        pendingToggle = true
+        bindBridge(service)
+        if (bridgeBinder != null && pendingToggle) {
+            pendingToggle = false
+            if (transactToggle()) log("$TAG authenticated Gboard Binder toggle accepted after rebind")
+        }
     }
 
     @XposedHooker
@@ -271,13 +348,18 @@ class BetterFlowXposedModule(
     companion object {
         private const val TAG = "betterFlow/Xposed"
         private const val GBOARD_PACKAGE = "com.google.android.inputmethod.latin"
-        private const val GBOARD_TRIGGER_AUTHORITY = "com.jadenjsj.betterflow.gboard-trigger"
-        private const val GBOARD_TRIGGER_METHOD = "toggle"
+        private const val BETTERFLOW_PACKAGE = "com.jadenjsj.betterflow"
+        private const val GBOARD_BRIDGE_SERVICE = "com.jadenjsj.betterflow.GboardBridgeService"
+        private const val GBOARD_BRIDGE_DESCRIPTOR = "com.jadenjsj.betterflow.GboardBridge"
+        private const val GBOARD_TRANSACTION_TOGGLE = IBinder.FIRST_CALL_TRANSACTION
         private const val SOFT_KEY_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyView"
         private const val SOFT_KEYBOARD_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyboardView"
 
         @Volatile private var activeModule: BetterFlowXposedModule? = null
         @Volatile private var currentIme: WeakReference<InputMethodService>? = null
+        @Volatile private var bridgeBinder: IBinder? = null
+        @Volatile private var bridgeConnection: ServiceConnection? = null
+        @Volatile private var pendingToggle = false
         @Volatile private var micKeyView: WeakReference<View>? = null
         @Volatile private var micGestureActive = false
         private val hookInstalled = AtomicBoolean(false)
