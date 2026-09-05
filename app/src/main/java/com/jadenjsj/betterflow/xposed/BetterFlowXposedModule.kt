@@ -203,6 +203,7 @@ class BetterFlowXposedModule(
         }
         val intent = Intent(ACTION_GBOARD_TOGGLE)
             .setClassName(BETTERFLOW_PACKAGE, GBOARD_TRIGGER_RECEIVER)
+            .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES or Intent.FLAG_RECEIVER_FOREGROUND)
         runCatching { service.sendBroadcast(intent) }
             .onSuccess { log("$TAG sent authenticated Gboard toggle broadcast") }
             .onFailure { log("$TAG Gboard toggle broadcast failed: ${it.message}", it) }
