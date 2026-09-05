@@ -1,6 +1,7 @@
 package com.jadenjsj.betterflow
 
 import android.content.Context
+import android.util.Log
 import com.google.protobuf.ByteString
 import com.jadenjsj.betterflow.proto.Commit
 import com.jadenjsj.betterflow.proto.Request
@@ -35,10 +36,13 @@ class WisprStreamingClient(context: Context) {
         onPartial: (String) -> Unit = {},
     ): Session {
         val apiKey = Prefs.streamingApiKey(appContext) ?: BuildConfig.WISPR_BASETEN_API_KEY.trim()
+        Log.i(TAG, "opening Wispr stream: model=$modelId keyPresent=${apiKey.isNotBlank()}")
         if (apiKey.isBlank()) {
             throw IllegalStateException("Wispr streaming credential is unavailable in this build")
         }
+        Log.i(TAG, "requesting fresh Wispr access token")
         val accessToken = wispr.freshAccessToken()
+        Log.i(TAG, "fresh Wispr access token acquired length=${accessToken.length}")
         return Session(
             accessToken = accessToken,
             apiKey = apiKey,
@@ -70,6 +74,7 @@ class WisprStreamingClient(context: Context) {
         @Volatile private var latestAudioReceivedSeconds: Float? = null
 
         init {
+            Log.i(TAG, "creating Baseten gRPC channel model=$modelId")
             val headers = Metadata().apply {
                 put(AUTHORIZATION, "Bearer $accessToken")
                 put(BASETEN_AUTHORIZATION, "Api-Key $apiKey")
@@ -108,6 +113,7 @@ class WisprStreamingClient(context: Context) {
                 }
 
                 override fun onError(t: Throwable) {
+                    Log.e(TAG, "Wispr gRPC stream error: ${t.message}", t)
                     finishExceptionally(t)
                 }
 
@@ -132,8 +138,11 @@ class WisprStreamingClient(context: Context) {
                     channel.shutdown()
                 }
             }
+            Log.i(TAG, "starting TranscriptionService/TranscribeStream")
             requestObserver = stub.transcribeStream(responseObserver)
+            Log.i(TAG, "gRPC stream observer created; sending init")
             send(buildInitRequest())
+            Log.i(TAG, "init sent")
         }
 
         fun sendAudio(chunk: ByteArray) {
@@ -224,6 +233,7 @@ class WisprStreamingClient(context: Context) {
     }
 
     companion object {
+        private const val TAG = "betterFlow/WisprStreaming"
         const val DEFAULT_MODEL_ID = "v31pl413"
     }
 }
