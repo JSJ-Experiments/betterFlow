@@ -22,13 +22,13 @@ last_check=0
 while true; do
   if pm path "$PKG" >/dev/null 2>&1; then
     ensure_permissions
-    if ! pidof "$PKG" >/dev/null 2>&1; then
+    if ! service_running; then
       start_app
       sleep 1
     fi
     boost_app
   elif [ -s "$DATA_DIR/current.apk" ]; then
-    pm install -r "$DATA_DIR/current.apk" >/dev/null 2>&1 || true
+    install_apk "$DATA_DIR/current.apk" || true
   fi
 
   AUTO=$(manifest_value auto_update "$CONFIG"); [ -n "$AUTO" ] || AUTO=1

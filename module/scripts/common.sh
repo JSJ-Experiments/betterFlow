@@ -33,6 +33,26 @@ manifest_value() {
   bb awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$file"
 }
 
+
+install_apk() {
+  src="$1"
+  [ -s "$src" ] || return 1
+  stage="/data/local/tmp/betterflow-install-$$.apk"
+  rm -f "$stage"
+  cp -f "$src" "$stage" || return 1
+  chmod 0644 "$stage" 2>/dev/null || true
+  if pm install -r "$stage" >/dev/null 2>&1; then
+    rm -f "$stage"
+    return 0
+  fi
+  rm -f "$stage"
+  return 1
+}
+
+service_running() {
+  dumpsys activity services "$PKG" 2>/dev/null | grep -q "${PKG}/.OverlayService"
+}
+
 ensure_permissions() {
   appops set "$PKG" SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || appops set "$PKG" android:system_alert_window allow >/dev/null 2>&1 || true
   pm grant "$PKG" android.permission.RECORD_AUDIO >/dev/null 2>&1 || true

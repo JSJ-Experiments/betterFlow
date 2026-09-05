@@ -56,7 +56,7 @@ cp -f "$APK" "$DATA_DIR/current.apk.new"
 chmod 600 "$DATA_DIR/current.apk.new"
 
 say "betterFlow: installing APK in-place…"
-if ! pm install -r "$DATA_DIR/current.apk.new" >/dev/null 2>&1; then
+if ! install_apk "$DATA_DIR/current.apk.new"; then
   say "betterFlow: APK install failed; leaving current version untouched"
   rm -f "$DATA_DIR/current.apk.new"
   exit 1
