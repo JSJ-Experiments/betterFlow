@@ -388,6 +388,15 @@ class BetterFlowXposedModule(
             .setClassName(BETTERFLOW_PACKAGE, GBOARD_BRIDGE_SERVICE)
             .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
         val ok = runCatching {
+            // Explicitly wake the bridge service first. Some Android 16/MIUI builds
+            // reject a direct bind from an injected IME process when the target app
+            // process is not already alive.
+            runCatching {
+                service.startService(intent)
+                log("$TAG Gboard Binder bridge startService requested")
+            }.onFailure {
+                log("$TAG Gboard Binder bridge startService failed: ${it.message}", it)
+            }
             service.bindService(intent, connection, Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT)
         }.getOrElse {
             log("$TAG Gboard Binder bridge bind failed: ${it.message}", it)
