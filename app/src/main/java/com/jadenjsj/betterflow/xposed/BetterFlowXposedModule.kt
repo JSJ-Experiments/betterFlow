@@ -89,7 +89,7 @@ class BetterFlowXposedModule(
                     when (intent?.action) {
                         InputInjector.ACTION_VOICE_STATE -> {
                             voiceState = VoiceState.fromWire(intent.getStringExtra(InputInjector.EXTRA_VOICE_STATE))
-                            setMicVisual(voiceState)
+                            applyVoiceStateVisual(service, voiceState)
                             log("$TAG voice state <- ${voiceState.wireName}")
                             return
                         }
@@ -263,6 +263,31 @@ class BetterFlowXposedModule(
         }
     }
 
+    private fun micTargetUsable(): Boolean {
+        val mic = micKeyView?.get() ?: return false
+        return mic.isAttachedToWindow && mic.isShown && mic.width > 0 && mic.height > 0
+    }
+
+    private fun applyVoiceStateVisual(service: InputMethodService, expected: VoiceState) {
+        if (!gboardMicEnabled) return
+        if (micTargetUsable()) {
+            setMicVisual(expected)
+            return
+        }
+
+        // Gboard can rebuild its header/toolbar immediately after the intercepted
+        // mic gesture. The old SoftKeyView may vanish between optimistic feedback
+        // and the authoritative service state. Reacquire the semantic voice key
+        // after that transient rebuild and repaint the current state.
+        MIC_REACQUIRE_DELAYS_MS.forEach { delayMs ->
+            Handler(service.mainLooper).postDelayed({
+                if (!gboardMicEnabled || voiceState != expected) return@postDelayed
+                if (!micTargetUsable()) locateGboardMic(service)
+                if (micTargetUsable()) setMicVisual(expected)
+            }, delayMs)
+        }
+    }
+
     private fun handleGboardTouch(callback: BeforeHookCallback) {
         val view = callback.thisObject as? View ?: return
         if (view.javaClass.name != SOFT_KEYBOARD_CLASS) return
@@ -412,7 +437,7 @@ class BetterFlowXposedModule(
             if (!binder.transact(GBOARD_TRANSACTION_GET_STATE, data, reply, 0)) return
             reply.readException()
             voiceState = VoiceState.fromWire(reply.readString())
-            setMicVisual(voiceState)
+            currentIme?.get()?.let { applyVoiceStateVisual(it, voiceState) } ?: setMicVisual(voiceState)
         } catch (t: Throwable) {
             log("$TAG Gboard Binder state query failed: ${t.message}", t)
         } finally {
@@ -598,6 +623,7 @@ class BetterFlowXposedModule(
         private const val GBOARD_TRANSACTION_GET_STATE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val GBOARD_TRANSACTION_GET_CONFIG = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val COMMIT_DEDUPE_TTL_MS = 10_000L
+        private val MIC_REACQUIRE_DELAYS_MS = longArrayOf(0L, 60L, 140L, 280L, 520L, 900L)
         private const val SOFT_KEY_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyView"
         private const val SOFT_KEYBOARD_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyboardView"
         private val VOICE_RESOURCE_TOKENS = listOf("voice", "microphone", "dictat", "speech", "mic_")
