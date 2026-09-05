@@ -7,8 +7,11 @@ import android.content.IntentFilter
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.ResultReceiver
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import com.jadenjsj.betterflow.InputInjector
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedInterface.AfterHookCallback
@@ -43,9 +46,17 @@ class BetterFlowXposedModule(
         hook(onDestroy, ImeOnDestroyHooker::class.java)
 
         if (param.packageName == GBOARD_PACKAGE) {
+            val onWindowShown = InputMethodService::class.java.getDeclaredMethod("onWindowShown")
+            hook(onWindowShown, ImeWindowShownHooker::class.java)
+
             val performClick = View::class.java.getDeclaredMethod("performClick")
             hook(performClick, ViewClickDiagnosticHooker::class.java)
-            log("$TAG Gboard click diagnostics armed")
+
+            val dispatchTouch = View::class.java.getDeclaredMethod("dispatchTouchEvent", MotionEvent::class.java)
+            hook(dispatchTouch, ViewTouchDiagnosticHooker::class.java)
+            val dispatchGroupTouch = ViewGroup::class.java.getDeclaredMethod("dispatchTouchEvent", MotionEvent::class.java)
+            hook(dispatchGroupTouch, ViewTouchDiagnosticHooker::class.java)
+            log("$TAG Gboard view-tree + touch diagnostics armed")
         }
         log("$TAG InputMethodService bridge armed for ${param.packageName}")
     }
@@ -98,6 +109,60 @@ class BetterFlowXposedModule(
         }
     }
 
+
+    private fun resourceName(view: View): String? = if (view.id != View.NO_ID) {
+        runCatching { view.resources.getResourceName(view.id) }.getOrNull()
+    } else null
+
+    private fun viewSummary(view: View): String {
+        val location = IntArray(2)
+        runCatching { view.getLocationOnScreen(location) }
+        return "class=${view.javaClass.name} id=${view.id} res=${resourceName(view) ?: "-"} " +
+            "desc=${view.contentDescription ?: "-"} pos=${location[0]},${location[1]} " +
+            "size=${view.width}x${view.height} visible=${view.visibility == View.VISIBLE}"
+    }
+
+    private fun dumpImeTree(service: InputMethodService) {
+        val root = service.window?.window?.decorView ?: run {
+            log("$TAG TREE no IME decorView")
+            return
+        }
+        var visited = 0
+        var candidates = 0
+        fun walk(view: View, depth: Int) {
+            visited++
+            val res = resourceName(view).orEmpty()
+            val desc = view.contentDescription?.toString().orEmpty()
+            val haystack = "$res $desc ${view.javaClass.name}".lowercase()
+            val location = IntArray(2)
+            runCatching { view.getLocationOnScreen(location) }
+            val rootLocation = IntArray(2)
+            runCatching { root.getLocationOnScreen(rootLocation) }
+            val toolbarBand = view.visibility == View.VISIBLE &&
+                location[1] >= rootLocation[1] && location[1] <= rootLocation[1] + 260
+            val interesting = listOf("mic", "voice", "dictat", "speech", "toolbar").any(haystack::contains) ||
+                (toolbarBand && location[0] >= root.width * 4 / 5)
+            if (interesting) {
+                candidates++
+                log("$TAG TREE depth=$depth ${viewSummary(view)}")
+            }
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) walk(view.getChildAt(i), depth + 1)
+            }
+        }
+        walk(root, 0)
+        log("$TAG TREE complete visited=$visited candidates=$candidates root=${viewSummary(root)}")
+    }
+
+    private fun logTouch(view: View, event: MotionEvent) {
+        if (event.actionMasked != MotionEvent.ACTION_UP) return
+        val location = IntArray(2)
+        runCatching { view.getLocationOnScreen(location) }
+        val screenX = location[0] + event.x.toInt()
+        val screenY = location[1] + event.y.toInt()
+        log("$TAG TOUCH up screen=$screenX,$screenY local=${event.x.toInt()},${event.y.toInt()} ${viewSummary(view)}")
+    }
+
     private fun logClickedView(view: View) {
         val resourceName = if (view.id != View.NO_ID) {
             runCatching { view.resources.getResourceName(view.id) }.getOrNull()
@@ -144,6 +209,35 @@ class BetterFlowXposedModule(
             fun before(callback: BeforeHookCallback) {
                 val service = callback.thisObject as? InputMethodService ?: return
                 runCatching { activeModule?.removeReceiver(service) }
+            }
+        }
+    }
+
+
+    @XposedHooker
+    class ImeWindowShownHooker : XposedInterface.Hooker {
+        companion object {
+            @JvmStatic
+            @AfterInvocation
+            fun after(callback: AfterHookCallback) {
+                val service = callback.thisObject as? InputMethodService ?: return
+                Handler(service.mainLooper).postDelayed({
+                    runCatching { activeModule?.dumpImeTree(service) }
+                        .onFailure { activeModule?.log("$TAG dumpImeTree failed: ${it.message}", it) }
+                }, 500L)
+            }
+        }
+    }
+
+    @XposedHooker
+    class ViewTouchDiagnosticHooker : XposedInterface.Hooker {
+        companion object {
+            @JvmStatic
+            @BeforeInvocation
+            fun before(callback: BeforeHookCallback) {
+                val view = callback.thisObject as? View ?: return
+                val event = callback.args.firstOrNull() as? MotionEvent ?: return
+                runCatching { activeModule?.logTouch(view, event) }
             }
         }
     }
