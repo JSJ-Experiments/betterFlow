@@ -58,6 +58,8 @@ private fun SettingsScreen() {
     var gboardMicEnabled by remember { mutableStateOf(Prefs.gboardMicEnabled(context)) }
     var bubbleEnabled by remember { mutableStateOf(Prefs.bubbleVisible(context)) }
     var legacyTranscription by remember { mutableStateOf(Prefs.legacyTranscription(context)) }
+    var streamingKeyConfigured by remember { mutableStateOf(Prefs.streamingApiKey(context) != null || BuildConfig.WISPR_BASETEN_API_KEY.isNotBlank()) }
+    var streamingApiKey by remember { mutableStateOf("") }
     var email by remember { mutableStateOf(session?.email.orEmpty()) }
     var password by remember { mutableStateOf("") }
     var sessionJson by remember { mutableStateOf("") }
@@ -113,6 +115,36 @@ private fun SettingsScreen() {
                             status = if (enabled) "Legacy whole-file transcription enabled" else "Realtime streaming enabled"
                         },
                     )
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Streaming credential: ${if (streamingKeyConfigured) "configured" else "missing"}")
+                    OutlinedTextField(
+                        value = streamingApiKey,
+                        onValueChange = { streamingApiKey = it },
+                        label = { Text("Streaming API key") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                Prefs.setStreamingApiKey(context, streamingApiKey)
+                                streamingKeyConfigured = streamingApiKey.isNotBlank() || BuildConfig.WISPR_BASETEN_API_KEY.isNotBlank()
+                                streamingApiKey = ""
+                                status = "Streaming credential saved privately on this device"
+                            },
+                            enabled = streamingApiKey.isNotBlank(),
+                        ) { Text("Save streaming key") }
+                        TextButton(onClick = {
+                            Prefs.setStreamingApiKey(context, null)
+                            streamingApiKey = ""
+                            streamingKeyConfigured = BuildConfig.WISPR_BASETEN_API_KEY.isNotBlank()
+                            status = "Device streaming credential cleared"
+                        }) { Text("Clear") }
+                    }
+                    Text("Stored only in betterFlow's private app data. It is never added to Git or release metadata.", style = MaterialTheme.typography.bodySmall)
                 }
 
                 Row(

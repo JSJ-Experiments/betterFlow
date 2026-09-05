@@ -21,6 +21,7 @@ object Prefs {
     private const val KEY_GBOARD_MIC_ENABLED = "gboard_mic_enabled"
     private const val KEY_VOICE_TRIGGER_V2_MIGRATED = "voice_trigger_v2_migrated"
     private const val KEY_LEGACY_TRANSCRIPTION = "legacy_transcription"
+    private const val KEY_STREAMING_API_KEY = "streaming_api_key"
 
     private fun prefs(context: Context) = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
@@ -76,6 +77,17 @@ object Prefs {
 
     fun setLegacyTranscription(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_LEGACY_TRANSCRIPTION, enabled).apply()
+    }
+
+    fun streamingApiKey(context: Context): String? =
+        prefs(context).getString(KEY_STREAMING_API_KEY, null)?.trim()?.takeIf { it.isNotEmpty() }
+
+    fun setStreamingApiKey(context: Context, apiKey: String?) {
+        val editor = prefs(context).edit()
+        val normalized = apiKey?.trim().orEmpty()
+        if (normalized.isEmpty()) editor.remove(KEY_STREAMING_API_KEY)
+        else editor.putString(KEY_STREAMING_API_KEY, normalized)
+        editor.apply()
     }
 }
 
