@@ -31,9 +31,11 @@
             </intent-filter>
         </activity>
 
-        <receiver
-            android:name=".GboardTriggerReceiver"
-            android:exported="true" />
+        <provider
+            android:name=".GboardTriggerProvider"
+            android:authorities="com.jadenjsj.betterflow.gboard-trigger"
+            android:exported="true"
+            android:grantUriPermissions="false" />
 
         <service
             android:name=".OverlayService"

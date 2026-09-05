@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Rect
+import android.net.Uri
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.os.Bundle
@@ -201,12 +202,18 @@ class BetterFlowXposedModule(
             log("$TAG cannot trigger betterFlow: no live IME service")
             return
         }
-        val intent = Intent(ACTION_GBOARD_TOGGLE)
-            .setClassName(BETTERFLOW_PACKAGE, GBOARD_TRIGGER_RECEIVER)
-            .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES or Intent.FLAG_RECEIVER_FOREGROUND)
-        runCatching { service.sendBroadcast(intent) }
-            .onSuccess { log("$TAG sent authenticated Gboard toggle broadcast") }
-            .onFailure { log("$TAG Gboard toggle broadcast failed: ${it.message}", it) }
+        runCatching {
+            val result = service.contentResolver.call(
+                Uri.parse("content://$GBOARD_TRIGGER_AUTHORITY"),
+                GBOARD_TRIGGER_METHOD,
+                null,
+                null,
+            )
+            val ok = result?.getBoolean("ok", false) == true
+            if (!ok) error(result?.getString("error") ?: "provider returned failure")
+        }
+            .onSuccess { log("$TAG authenticated Gboard provider toggle accepted") }
+            .onFailure { log("$TAG Gboard provider toggle failed: ${it.message}", it) }
     }
 
     @XposedHooker
@@ -264,9 +271,8 @@ class BetterFlowXposedModule(
     companion object {
         private const val TAG = "betterFlow/Xposed"
         private const val GBOARD_PACKAGE = "com.google.android.inputmethod.latin"
-        private const val BETTERFLOW_PACKAGE = "com.jadenjsj.betterflow"
-        private const val ACTION_GBOARD_TOGGLE = "com.jadenjsj.betterflow.action.GBOARD_TOGGLE"
-        private const val GBOARD_TRIGGER_RECEIVER = "com.jadenjsj.betterflow.GboardTriggerReceiver"
+        private const val GBOARD_TRIGGER_AUTHORITY = "com.jadenjsj.betterflow.gboard-trigger"
+        private const val GBOARD_TRIGGER_METHOD = "toggle"
         private const val SOFT_KEY_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyView"
         private const val SOFT_KEYBOARD_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyboardView"
 
