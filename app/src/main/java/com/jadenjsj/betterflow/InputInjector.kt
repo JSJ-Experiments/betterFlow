@@ -93,10 +93,12 @@ class InputInjector(private val context: Context) {
 
     companion object {
         const val ACTION_COMMIT_TEXT = "com.jadenjsj.betterflow.action.COMMIT_TEXT"
+        const val ACTION_VOICE_STATE = "com.jadenjsj.betterflow.action.VOICE_STATE"
         const val COMMIT_PERMISSION = "com.jadenjsj.betterflow.permission.COMMIT_TEXT"
         const val EXTRA_TEXT = "text"
         const val EXTRA_REQUEST_ID = "request_id"
         const val EXTRA_DEADLINE_ELAPSED_REALTIME = "deadline_elapsed_realtime"
+        const val EXTRA_VOICE_STATE = "voice_state"
         const val EXTRA_RESULT_RECEIVER = "result_receiver"
         const val RESULT_OK = 1
         const val RESULT_FAILED = 0

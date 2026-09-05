@@ -42,3 +42,7 @@ object Prefs {
         prefs(context).edit().putBoolean(KEY_BUBBLE_VISIBLE, visible).apply()
     }
 }
+
+object VoiceRuntimeState {
+    @Volatile var wireName: String = "idle"
+}

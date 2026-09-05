@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -13,6 +14,7 @@ import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -43,7 +45,9 @@ class OverlayService : Service() {
         injector = InputInjector(applicationContext)
         windowManager = getSystemService(WindowManager::class.java)
         ensureNotificationChannel()
+        VoiceRuntimeState.wireName = BubbleState.IDLE.wireName
         updateForeground(BubbleState.IDLE)
+        broadcastVoiceState(BubbleState.IDLE)
         if (Prefs.bubbleVisible(this)) showBubble(persist = false)
     }
 
@@ -62,6 +66,9 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         if (recorder.isRecording()) runCatching { recorder.stopAndGetWav() }
+        state = BubbleState.IDLE
+        VoiceRuntimeState.wireName = BubbleState.IDLE.wireName
+        broadcastVoiceState(BubbleState.IDLE)
         hideBubble(persist = false)
         scope.cancel()
         super.onDestroy()
@@ -214,8 +221,20 @@ class OverlayService : Service() {
 
     private fun updateState(next: BubbleState) {
         state = next
+        VoiceRuntimeState.wireName = next.wireName
         updateBubbleVisual(next)
         updateForeground(next)
+        broadcastVoiceState(next)
+    }
+
+    private fun broadcastVoiceState(next: BubbleState) {
+        val flattened = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD) ?: return
+        val imePackage = ComponentName.unflattenFromString(flattened)?.packageName ?: return
+        sendBroadcast(
+            Intent(InputInjector.ACTION_VOICE_STATE)
+                .setPackage(imePackage)
+                .putExtra(InputInjector.EXTRA_VOICE_STATE, next.wireName),
+        )
     }
 
     private fun updateBubbleVisual(next: BubbleState) {
@@ -289,7 +308,7 @@ class OverlayService : Service() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
-    private enum class BubbleState { IDLE, RECORDING, PROCESSING }
+    private enum class BubbleState(val wireName: String) { IDLE("idle"), RECORDING("recording"), PROCESSING("processing") }
 
     companion object {
         const val ACTION_SHOW = "com.jadenjsj.betterflow.action.SHOW"
