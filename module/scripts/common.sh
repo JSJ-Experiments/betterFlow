@@ -2,6 +2,7 @@
 MODID=betterflow
 PKG=com.jadenjsj.betterflow
 SERVICE=com.jadenjsj.betterflow/.OverlayService
+WAKE_ACTIVITY=com.jadenjsj.betterflow/.WakeActivity
 ACTION_WAKE=com.jadenjsj.betterflow.action.WAKE
 DATA_DIR=/data/adb/betterflow-data
 REPO=JSJ-Experiments/betterFlow
@@ -60,9 +61,15 @@ ensure_permissions() {
 }
 
 start_app() {
-  cmd package set-stopped-state "$PKG" false >/dev/null 2>&1 || true
-  am start-foreground-service --user 0 -a "$ACTION_WAKE" -n "$SERVICE" >/dev/null 2>&1 || \
-    am startservice --user 0 -a "$ACTION_WAKE" -n "$SERVICE" >/dev/null 2>&1 || true
+  if am start-foreground-service --user 0 -a "$ACTION_WAKE" -n "$SERVICE" >/dev/null 2>&1; then
+    return 0
+  fi
+  if am startservice --user 0 -a "$ACTION_WAKE" -n "$SERVICE" >/dev/null 2>&1; then
+    return 0
+  fi
+  # HyperOS lacks `cmd package set-stopped-state`; if the app was force-stopped,
+  # a no-display Activity launch clears that state and wakes OverlayService.
+  am start --user 0 --include-stopped-packages -n "$WAKE_ACTIVITY" >/dev/null 2>&1 || true
 }
 
 boost_app() {
