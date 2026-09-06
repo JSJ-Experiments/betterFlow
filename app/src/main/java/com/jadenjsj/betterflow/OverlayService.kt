@@ -82,6 +82,7 @@ class OverlayService : Service() {
             ACTION_HIDE -> hideBubble(persist = true)
             ACTION_SHOW -> showBubble(persist = true)
             ACTION_WAKE -> restoreBubbleVisibility()
+            ACTION_REFRESH_CONFIG -> refreshRuntimeConfig()
             ACTION_TOGGLE -> toggleRecording()
             ACTION_STOP -> stopSelf()
             else -> restoreBubbleVisibility()
@@ -124,15 +125,15 @@ class OverlayService : Service() {
     private fun showBubble(persist: Boolean = true) {
         if (persist) Prefs.setBubbleVisible(this, true)
         if (bubble != null) {
-            clampCurrentBubblePosition(persist = true)
-            updateForeground(state)
+            refreshRuntimeConfig()
             return
         }
-        val size = dp(58)
+        val size = bubbleSizePx()
+        val padding = bubblePaddingPx(size)
         val image = ImageView(this).apply {
             setImageResource(R.drawable.ic_mic)
-            setPadding(dp(15), dp(15), dp(15), dp(15))
-            elevation = dp(8).toFloat()
+            setPadding(padding, padding, padding, padding)
+            elevation = bubbleElevationPx(size)
         }
         val (savedX, savedY) = Prefs.bubblePosition(this)
         val lp = WindowManager.LayoutParams(
@@ -168,7 +169,7 @@ class OverlayService : Service() {
                     dragged = false
                     image.scaleX = 0.84f
                     image.scaleY = 0.84f
-                    image.alpha = 0.72f
+                    image.alpha = bubbleBaseAlpha() * PRESSED_ALPHA_MULTIPLIER
                     image.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     true
                 }
@@ -215,10 +216,28 @@ class OverlayService : Service() {
         updateForeground(state)
     }
 
+    private fun refreshRuntimeConfig() {
+        ensureNotificationChannel()
+        val image = bubble as? ImageView
+        val p = params
+        if (image != null && p != null) {
+            val size = bubbleSizePx()
+            val padding = bubblePaddingPx(size)
+            p.width = size
+            p.height = size
+            image.setPadding(padding, padding, padding, padding)
+            image.elevation = bubbleElevationPx(size)
+            clampBubblePosition(p, size, persist = true)
+            runCatching { windowManager.updateViewLayout(image, p) }
+            updateBubbleVisual(state)
+        }
+        updateForeground(state)
+    }
+
     private fun clampCurrentBubblePosition(persist: Boolean) {
         val image = bubble ?: return
         val p = params ?: return
-        val size = p.width.takeIf { it > 0 } ?: dp(58)
+        val size = p.width.takeIf { it > 0 } ?: bubbleSizePx()
         if (clampBubblePosition(p, size, persist)) {
             runCatching { windowManager.updateViewLayout(image, p) }
         }
@@ -236,9 +255,18 @@ class OverlayService : Service() {
         val usableWidth = (metrics.bounds.width() - insets.left - insets.right).coerceAtLeast(size)
         val usableHeight = (metrics.bounds.height() - insets.top - insets.bottom).coerceAtLeast(size)
         val margin = dp(BUBBLE_SAFE_MARGIN_DP)
-        val maxX = (usableWidth - size - margin).coerceAtLeast(0)
+
+        // Keep the top/bottom safe so the handle can never get trapped behind
+        // system UI, but let most of the bubble tuck past either side edge.
+        // A minimum visible handle remains draggable even at the smallest size.
+        val minimumVisible = maxOf(
+            dp(BUBBLE_MIN_VISIBLE_HANDLE_DP),
+            (size * BUBBLE_VISIBLE_EDGE_FRACTION).toInt(),
+        ).coerceAtMost(size)
+        val horizontalHidden = (size - minimumVisible).coerceAtLeast(0)
+        val minX = -horizontalHidden
+        val maxX = (usableWidth - size + horizontalHidden).coerceAtLeast(minX)
         val maxY = (usableHeight - size - margin).coerceAtLeast(0)
-        val minX = if (maxX >= margin) margin else 0
         val minY = if (maxY >= margin) margin else 0
         val nextX = p.x.coerceIn(minX, maxX)
         val nextY = p.y.coerceIn(minY, maxY)
@@ -554,7 +582,8 @@ class OverlayService : Service() {
             shape = GradientDrawable.OVAL
             setColor(color)
         }
-        bubble?.alpha = if (next == BubbleState.PROCESSING) 0.8f else 1f
+        val stateMultiplier = if (next == BubbleState.PROCESSING) PROCESSING_ALPHA_MULTIPLIER else 1f
+        bubble?.alpha = bubbleBaseAlpha() * stateMultiplier
     }
 
     private fun updateForeground(next: BubbleState) {
@@ -589,7 +618,9 @@ class OverlayService : Service() {
             Intent(this, OverlayService::class.java).setAction(if (bubbleVisible) ACTION_HIDE else ACTION_SHOW),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        return Notification.Builder(this, CHANNEL_ID)
+        val priority = Prefs.notificationPriority(this)
+        ensureNotificationChannel(priority)
+        return Notification.Builder(this, notificationChannelId(priority))
             .setSmallIcon(R.drawable.ic_mic)
             .setContentTitle("betterFlow")
             .setContentText(text)
@@ -606,12 +637,39 @@ class OverlayService : Service() {
             .build()
     }
 
-    private fun ensureNotificationChannel() {
+    private fun ensureNotificationChannel(priority: NotificationPriority = Prefs.notificationPriority(this)) {
         val manager = getSystemService(NotificationManager::class.java)
+        val importance = when (priority) {
+            NotificationPriority.MIN -> NotificationManager.IMPORTANCE_MIN
+            NotificationPriority.LOW -> NotificationManager.IMPORTANCE_LOW
+            NotificationPriority.DEFAULT -> NotificationManager.IMPORTANCE_DEFAULT
+            NotificationPriority.HIGH -> NotificationManager.IMPORTANCE_HIGH
+        }
         manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, getString(R.string.notification_channel), NotificationManager.IMPORTANCE_LOW),
+            NotificationChannel(
+                notificationChannelId(priority),
+                "${getString(R.string.notification_channel)} · ${priority.displayName}",
+                importance,
+            ).apply { setShowBadge(false) },
         )
     }
+
+    private fun notificationChannelId(priority: NotificationPriority): String =
+        "$CHANNEL_ID_PREFIX-${priority.wireName}"
+
+    private fun bubbleSizePx(): Int = dp(Prefs.bubbleSizeDp(this))
+
+    private fun bubblePaddingPx(sizePx: Int): Int =
+        maxOf(dp(8), (sizePx * BUBBLE_PADDING_FRACTION).toInt())
+
+    private fun bubbleElevationPx(sizePx: Int): Float =
+        maxOf(dp(4).toFloat(), sizePx * BUBBLE_ELEVATION_FRACTION)
+
+    private fun bubbleBaseAlpha(): Float =
+        Prefs.bubbleOpacityPercent(this).coerceIn(
+            Prefs.MIN_BUBBLE_OPACITY_PERCENT,
+            Prefs.MAX_BUBBLE_OPACITY_PERCENT,
+        ) / 100f
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
@@ -622,13 +680,20 @@ class OverlayService : Service() {
         const val ACTION_HIDE = "com.jadenjsj.betterflow.action.HIDE"
         const val ACTION_TOGGLE = "com.jadenjsj.betterflow.action.TOGGLE"
         const val ACTION_WAKE = "com.jadenjsj.betterflow.action.WAKE"
+        const val ACTION_REFRESH_CONFIG = "com.jadenjsj.betterflow.action.REFRESH_CONFIG"
         const val ACTION_STOP = "com.jadenjsj.betterflow.action.STOP"
-        private const val CHANNEL_ID = "betterflow-overlay"
+        private const val CHANNEL_ID_PREFIX = "betterflow-overlay-v2"
         private const val NOTIFICATION_ID = 1206
         private const val STREAM_QUEUE_CAPACITY = 128
         private const val STREAM_OPEN_TIMEOUT_MS = 20_000L
         private const val STREAM_RESULT_TIMEOUT_MS = 30_000L
         private const val BUBBLE_SAFE_MARGIN_DP = 12
+        private const val BUBBLE_MIN_VISIBLE_HANDLE_DP = 18
+        private const val BUBBLE_VISIBLE_EDGE_FRACTION = 0.40f
+        private const val BUBBLE_PADDING_FRACTION = 15f / 58f
+        private const val BUBBLE_ELEVATION_FRACTION = 8f / 58f
+        private const val PRESSED_ALPHA_MULTIPLIER = 0.72f
+        private const val PROCESSING_ALPHA_MULTIPLIER = 0.80f
         private const val TAG = "betterFlow/Voice"
     }
 }

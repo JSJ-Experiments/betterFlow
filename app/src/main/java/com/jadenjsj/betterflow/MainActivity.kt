@@ -1,6 +1,7 @@
 package com.jadenjsj.betterflow
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -25,6 +26,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -34,11 +36,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,6 +57,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private fun refreshOverlayConfig(context: Context) {
+    runCatching {
+        context.startForegroundService(
+            Intent(context, OverlayService::class.java)
+                .setAction(OverlayService.ACTION_REFRESH_CONFIG),
+        )
+    }
+}
+
 @Composable
 private fun SettingsScreen() {
     val context = LocalContext.current
@@ -63,6 +76,9 @@ private fun SettingsScreen() {
     var backend by remember { mutableStateOf(Prefs.backend(context)) }
     var gboardMicEnabled by remember { mutableStateOf(Prefs.gboardMicEnabled(context)) }
     var bubbleEnabled by remember { mutableStateOf(Prefs.bubbleVisible(context)) }
+    var bubbleSizeDp by remember { mutableStateOf(Prefs.bubbleSizeDp(context)) }
+    var bubbleOpacityPercent by remember { mutableStateOf(Prefs.bubbleOpacityPercent(context)) }
+    var notificationPriority by remember { mutableStateOf(Prefs.notificationPriority(context)) }
     var legacyTranscription by remember { mutableStateOf(Prefs.legacyTranscription(context)) }
     var streamingKeyConfigured by remember { mutableStateOf(Prefs.streamingApiKey(context) != null || BuildConfig.WISPR_BASETEN_API_KEY.isNotBlank()) }
     var streamingApiKey by remember { mutableStateOf("") }
@@ -159,7 +175,10 @@ private fun SettingsScreen() {
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text("Floating microphone")
-                        Text("Legacy always-on-top trigger; optional fallback.", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "Optional fallback. Drag it partly past the left/right edge to tuck it away while keeping a handle visible.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                     Switch(
                         checked = bubbleEnabled,
@@ -181,6 +200,69 @@ private fun SettingsScreen() {
                         },
                     )
                 }
+
+                Text("Floating button size: $bubbleSizeDp dp")
+                Slider(
+                    value = bubbleSizeDp.toFloat(),
+                    onValueChange = { bubbleSizeDp = it.roundToInt() },
+                    onValueChangeFinished = {
+                        Prefs.setBubbleSizeDp(context, bubbleSizeDp)
+                        refreshOverlayConfig(context)
+                        status = "Floating button size set to $bubbleSizeDp dp"
+                    },
+                    valueRange = Prefs.MIN_BUBBLE_SIZE_DP.toFloat()..Prefs.MAX_BUBBLE_SIZE_DP.toFloat(),
+                )
+
+                Text("Floating button opacity: $bubbleOpacityPercent%")
+                Slider(
+                    value = bubbleOpacityPercent.toFloat(),
+                    onValueChange = { bubbleOpacityPercent = it.roundToInt() },
+                    onValueChangeFinished = {
+                        Prefs.setBubbleOpacityPercent(context, bubbleOpacityPercent)
+                        refreshOverlayConfig(context)
+                        status = "Floating button opacity set to $bubbleOpacityPercent%"
+                    },
+                    valueRange = Prefs.MIN_BUBBLE_OPACITY_PERCENT.toFloat()..Prefs.MAX_BUBBLE_OPACITY_PERCENT.toFloat(),
+                )
+
+                Spacer(Modifier.height(2.dp))
+                Text("Foreground notification priority")
+                Text(
+                    "Choose how prominently Android posts betterFlow's persistent service notification.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                NotificationPriority.entries.forEach { option ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = notificationPriority == option,
+                            onClick = {
+                                notificationPriority = option
+                                Prefs.setNotificationPriority(context, option)
+                                refreshOverlayConfig(context)
+                                status = "Notification priority set to ${option.displayName}"
+                            },
+                        )
+                        Column(Modifier.weight(1f)) {
+                            Text(option.displayName)
+                            Text(
+                                when (option) {
+                                    NotificationPriority.MIN -> "Least prominent / silent where Android permits it."
+                                    NotificationPriority.LOW -> "Quiet persistent notification (current default)."
+                                    NotificationPriority.DEFAULT -> "Normal notification importance."
+                                    NotificationPriority.HIGH -> "Most prominent; may produce a heads-up alert."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    "If you manually change a betterFlow channel in Android notification settings, Android may keep that manual override.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
 

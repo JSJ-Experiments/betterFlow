@@ -12,12 +12,27 @@ enum class InputBackend(val wireName: String) {
     }
 }
 
+enum class NotificationPriority(val wireName: String, val displayName: String) {
+    MIN("min", "Minimum"),
+    LOW("low", "Low"),
+    DEFAULT("default", "Normal"),
+    HIGH("high", "High");
+
+    companion object {
+        fun fromWireName(value: String?): NotificationPriority =
+            entries.firstOrNull { it.wireName == value } ?: LOW
+    }
+}
+
 object Prefs {
     private const val NAME = "betterflow"
     private const val KEY_BACKEND = "input_backend"
     private const val KEY_BUBBLE_X = "bubble_x"
     private const val KEY_BUBBLE_Y = "bubble_y"
     private const val KEY_BUBBLE_VISIBLE = "bubble_visible"
+    private const val KEY_BUBBLE_SIZE_DP = "bubble_size_dp"
+    private const val KEY_BUBBLE_OPACITY_PERCENT = "bubble_opacity_percent"
+    private const val KEY_NOTIFICATION_PRIORITY = "notification_priority"
     private const val KEY_GBOARD_MIC_ENABLED = "gboard_mic_enabled"
     private const val KEY_VOICE_TRIGGER_V2_MIGRATED = "voice_trigger_v2_migrated"
     private const val KEY_LEGACY_TRANSCRIPTION = "legacy_transcription"
@@ -62,6 +77,38 @@ object Prefs {
         prefs(context).edit().putBoolean(KEY_BUBBLE_VISIBLE, visible).apply()
     }
 
+    fun bubbleSizeDp(context: Context): Int =
+        prefs(context).getInt(KEY_BUBBLE_SIZE_DP, DEFAULT_BUBBLE_SIZE_DP)
+            .coerceIn(MIN_BUBBLE_SIZE_DP, MAX_BUBBLE_SIZE_DP)
+
+    fun setBubbleSizeDp(context: Context, sizeDp: Int) {
+        prefs(context).edit()
+            .putInt(KEY_BUBBLE_SIZE_DP, sizeDp.coerceIn(MIN_BUBBLE_SIZE_DP, MAX_BUBBLE_SIZE_DP))
+            .apply()
+    }
+
+    fun bubbleOpacityPercent(context: Context): Int =
+        prefs(context).getInt(KEY_BUBBLE_OPACITY_PERCENT, DEFAULT_BUBBLE_OPACITY_PERCENT)
+            .coerceIn(MIN_BUBBLE_OPACITY_PERCENT, MAX_BUBBLE_OPACITY_PERCENT)
+
+    fun setBubbleOpacityPercent(context: Context, opacityPercent: Int) {
+        prefs(context).edit()
+            .putInt(
+                KEY_BUBBLE_OPACITY_PERCENT,
+                opacityPercent.coerceIn(MIN_BUBBLE_OPACITY_PERCENT, MAX_BUBBLE_OPACITY_PERCENT),
+            )
+            .apply()
+    }
+
+    fun notificationPriority(context: Context): NotificationPriority =
+        NotificationPriority.fromWireName(
+            prefs(context).getString(KEY_NOTIFICATION_PRIORITY, NotificationPriority.LOW.wireName),
+        )
+
+    fun setNotificationPriority(context: Context, priority: NotificationPriority) {
+        prefs(context).edit().putString(KEY_NOTIFICATION_PRIORITY, priority.wireName).apply()
+    }
+
     fun gboardMicEnabled(context: Context): Boolean {
         ensureVoiceTriggerDefaults(context)
         return prefs(context).getBoolean(KEY_GBOARD_MIC_ENABLED, true)
@@ -89,6 +136,13 @@ object Prefs {
         else editor.putString(KEY_STREAMING_API_KEY, normalized)
         editor.apply()
     }
+
+    const val MIN_BUBBLE_SIZE_DP = 36
+    const val MAX_BUBBLE_SIZE_DP = 88
+    const val DEFAULT_BUBBLE_SIZE_DP = 58
+    const val MIN_BUBBLE_OPACITY_PERCENT = 20
+    const val MAX_BUBBLE_OPACITY_PERCENT = 100
+    const val DEFAULT_BUBBLE_OPACITY_PERCENT = 100
 }
 
 object VoiceRuntimeState {
