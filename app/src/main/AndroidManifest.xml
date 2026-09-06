@@ -43,6 +43,12 @@
             android:permission="com.jadenjsj.betterflow.permission.CONTROL_SERVICE"
             android:theme="@android:style/Theme.NoDisplay" />
 
+        <provider
+            android:name=".GboardBridgeProvider"
+            android:authorities="com.jadenjsj.betterflow.gboard-bridge"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+
         <receiver
             android:name=".GboardBridgeReceiver"
             android:exported="true" />

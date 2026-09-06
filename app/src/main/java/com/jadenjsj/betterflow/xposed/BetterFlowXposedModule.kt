@@ -11,6 +11,7 @@ import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -524,6 +525,34 @@ class BetterFlowXposedModule(
         }
     }
 
+    private fun callBridgeProvider(service: InputMethodService, method: String): Bundle? =
+        runCatching {
+            service.contentResolver.call(
+                Uri.parse("content://$GBOARD_BRIDGE_PROVIDER_AUTHORITY"),
+                method,
+                null,
+                null,
+            )
+        }.onFailure {
+            log("$TAG Gboard provider call method=$method failed: ${it.message}", it)
+        }.getOrNull()
+
+    private fun applyBridgeSnapshot(service: InputMethodService, data: Bundle): Boolean {
+        if (!data.getBoolean(GBOARD_BRIDGE_PROVIDER_KEY_OK, false)) return false
+        gboardMicEnabled = data.getBoolean(GBOARD_BRIDGE_PROVIDER_KEY_GBOARD_MIC_ENABLED, true)
+        voiceState = VoiceState.fromWire(data.getString(GBOARD_BRIDGE_PROVIDER_KEY_VOICE_STATE))
+        if (gboardMicEnabled) {
+            locateGboardMic(service)
+            applyVoiceStateVisual(service, voiceState)
+        } else {
+            micGestureActive = false
+            micPressed = false
+            restoreMicVisual(micKeyView?.get())
+        }
+        log("$TAG Gboard provider snapshot state=${voiceState.wireName} enabled=$gboardMicEnabled")
+        return true
+    }
+
     private fun sendBridgeBroadcast(
         service: InputMethodService,
         command: String,
@@ -560,6 +589,9 @@ class BetterFlowXposedModule(
     }
 
     private fun requestBridgeSnapshot(service: InputMethodService) {
+        val providerData = callBridgeProvider(service, GBOARD_BRIDGE_PROVIDER_METHOD_SNAPSHOT)
+        if (providerData != null && applyBridgeSnapshot(service, providerData)) return
+
         sendBridgeBroadcast(service, GBOARD_BRIDGE_COMMAND_SNAPSHOT) { resultCode, data ->
             if (resultCode != GBOARD_BRIDGE_RESULT_OK || data == null) return@sendBridgeBroadcast
             gboardMicEnabled = data.getBoolean(GBOARD_BRIDGE_EXTRA_GBOARD_MIC_ENABLED, true)
@@ -572,7 +604,7 @@ class BetterFlowXposedModule(
                 micPressed = false
                 restoreMicVisual(micKeyView?.get())
             }
-            log("$TAG Gboard bridge snapshot state=${voiceState.wireName} enabled=$gboardMicEnabled")
+            log("$TAG Gboard broadcast snapshot state=${voiceState.wireName} enabled=$gboardMicEnabled")
         }
     }
 
@@ -602,6 +634,31 @@ class BetterFlowXposedModule(
             log("$TAG cannot trigger betterFlow: no live IME service")
             return false
         }
+        val providerData = callBridgeProvider(service, GBOARD_BRIDGE_PROVIDER_METHOD_TOGGLE)
+        if (providerData?.getBoolean(GBOARD_BRIDGE_PROVIDER_KEY_OK, false) == true) {
+            val pendingIntent = if (Build.VERSION.SDK_INT >= 33) {
+                providerData.getParcelable(
+                    GBOARD_BRIDGE_PROVIDER_KEY_TOGGLE_PENDING_INTENT,
+                    PendingIntent::class.java,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                providerData.getParcelable(GBOARD_BRIDGE_PROVIDER_KEY_TOGGLE_PENDING_INTENT)
+            }
+            if (pendingIntent != null) {
+                return runCatching { pendingIntent.send() }
+                    .onSuccess {
+                        pendingToggle = false
+                        log("$TAG authenticated Gboard provider PendingIntent toggle sent")
+                        scheduleBridgeStateSync(service)
+                    }
+                    .onFailure {
+                        log("$TAG Gboard provider PendingIntent send failed: ${it.message}", it)
+                    }
+                    .isSuccess
+            }
+        }
+
         val generation = ++bridgeRequestGeneration
         pendingToggle = true
         val sent = sendBridgeBroadcast(service, GBOARD_BRIDGE_COMMAND_TOGGLE) { resultCode, data ->
@@ -774,6 +831,13 @@ class BetterFlowXposedModule(
         private const val BETTERFLOW_PACKAGE = "com.jadenjsj.betterflow"
         private const val GBOARD_BRIDGE_SERVICE = "com.jadenjsj.betterflow.GboardBridgeService"
         private const val GBOARD_BRIDGE_RECEIVER = "com.jadenjsj.betterflow.GboardBridgeReceiver"
+        private const val GBOARD_BRIDGE_PROVIDER_AUTHORITY = "com.jadenjsj.betterflow.gboard-bridge"
+        private const val GBOARD_BRIDGE_PROVIDER_METHOD_SNAPSHOT = "snapshot"
+        private const val GBOARD_BRIDGE_PROVIDER_METHOD_TOGGLE = "toggle_pending_intent"
+        private const val GBOARD_BRIDGE_PROVIDER_KEY_OK = "ok"
+        private const val GBOARD_BRIDGE_PROVIDER_KEY_VOICE_STATE = "voice_state"
+        private const val GBOARD_BRIDGE_PROVIDER_KEY_GBOARD_MIC_ENABLED = "gboard_mic_enabled"
+        private const val GBOARD_BRIDGE_PROVIDER_KEY_TOGGLE_PENDING_INTENT = "toggle_pending_intent"
         private const val GBOARD_BRIDGE_BROADCAST_ACTION = "com.jadenjsj.betterflow.action.GBOARD_BRIDGE"
         private const val GBOARD_BRIDGE_PROOF_ACTION = "com.jadenjsj.betterflow.action.GBOARD_SENDER_PROOF"
         private const val GBOARD_BRIDGE_COMMAND_SNAPSHOT = "snapshot"
