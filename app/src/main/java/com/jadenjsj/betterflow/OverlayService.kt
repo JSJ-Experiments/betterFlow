@@ -23,6 +23,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.Toast
 import kotlinx.coroutines.CancellationException
@@ -49,6 +50,8 @@ class OverlayService : Service() {
     private lateinit var injector: InputInjector
     private lateinit var windowManager: WindowManager
     private var bubble: View? = null
+    private var bubbleImage: ImageView? = null
+    private var bubbleDockSide = BubbleDockSide.NONE
     private var params: WindowManager.LayoutParams? = null
     private var state = BubbleState.IDLE
     private var operationGeneration = 0L
@@ -135,7 +138,13 @@ class OverlayService : Service() {
             setPadding(padding, padding, padding, padding)
             elevation = bubbleElevationPx(size)
         }
+        val container = FrameLayout(this).apply {
+            clipChildren = true
+            clipToPadding = true
+            addView(image, FrameLayout.LayoutParams(size, size))
+        }
         val (savedX, savedY) = Prefs.bubblePosition(this)
+        bubbleDockSide = Prefs.bubbleDockSide(this)
         val lp = WindowManager.LayoutParams(
             size,
             size,
@@ -148,9 +157,10 @@ class OverlayService : Service() {
             x = savedX
             y = savedY
         }
-        clampBubblePosition(lp, size, persist = true)
+        applyBubbleGeometry(lp, image, size, bubbleDockSide, persist = true)
         params = lp
-        bubble = image
+        bubble = container
+        bubbleImage = image
         updateBubbleVisual(BubbleState.IDLE)
 
         var downRawX = 0f
@@ -158,7 +168,7 @@ class OverlayService : Service() {
         var downX = 0
         var downY = 0
         var dragged = false
-        image.setOnTouchListener { _, event ->
+        container.setOnTouchListener { _, event ->
             val p = params ?: return@setOnTouchListener false
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -170,26 +180,38 @@ class OverlayService : Service() {
                     image.scaleX = 0.84f
                     image.scaleY = 0.84f
                     image.alpha = bubbleBaseAlpha() * PRESSED_ALPHA_MULTIPLIER
-                    image.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    container.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - downRawX).toInt()
-                    val dy = (event.rawY - downRawY).toInt()
+                    var dx = (event.rawX - downRawX).toInt()
+                    var dy = (event.rawY - downRawY).toInt()
                     if (abs(dx) > dp(6) || abs(dy) > dp(6)) {
-                        dragged = true
+                        if (!dragged) {
+                            dragged = true
+                            if (bubbleDockSide != BubbleDockSide.NONE) {
+                                undockBubbleForDrag(p, container, image, size)
+                                downRawX = event.rawX
+                                downRawY = event.rawY
+                                downX = p.x
+                                downY = p.y
+                                dx = 0
+                                dy = 0
+                            }
+                        }
                         image.scaleX = 1f
                         image.scaleY = 1f
                         updateBubbleVisual(state)
                     }
                     p.x = downX + dx
                     p.y = downY + dy
-                    clampBubblePosition(p, size, persist = false)
-                    runCatching { windowManager.updateViewLayout(image, p) }
+                    clampBubbleDragPosition(p, size)
+                    runCatching { windowManager.updateViewLayout(container, p) }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    clampBubblePosition(p, size, persist = true)
+                    settleBubblePosition(p, image, size, persist = true)
+                    runCatching { windowManager.updateViewLayout(container, p) }
                     image.scaleX = 1f
                     image.scaleY = 1f
                     if (!dragged) toggleRecording() else updateBubbleVisual(state)
@@ -206,9 +228,10 @@ class OverlayService : Service() {
         }
 
         try {
-            windowManager.addView(image, lp)
+            windowManager.addView(container, lp)
         } catch (t: Throwable) {
             bubble = null
+            bubbleImage = null
             params = null
             if (persist) Prefs.setBubbleVisible(this, false)
             Toast.makeText(this, "betterFlow cannot draw the bubble: ${t.message}", Toast.LENGTH_LONG).show()
@@ -218,71 +241,154 @@ class OverlayService : Service() {
 
     private fun refreshRuntimeConfig() {
         ensureNotificationChannel()
-        val image = bubble as? ImageView
-        val p = params
-        if (image != null && p != null) {
-            val size = bubbleSizePx()
-            val padding = bubblePaddingPx(size)
-            p.width = size
-            p.height = size
-            image.setPadding(padding, padding, padding, padding)
-            image.elevation = bubbleElevationPx(size)
-            clampBubblePosition(p, size, persist = true)
-            runCatching { windowManager.updateViewLayout(image, p) }
-            updateBubbleVisual(state)
+        val container = bubble ?: return updateForeground(state)
+        val image = bubbleImage ?: return updateForeground(state)
+        val p = params ?: return updateForeground(state)
+        val size = bubbleSizePx()
+        val padding = bubblePaddingPx(size)
+        image.layoutParams = (image.layoutParams ?: FrameLayout.LayoutParams(size, size)).apply {
+            width = size
+            height = size
         }
+        image.setPadding(padding, padding, padding, padding)
+        image.elevation = bubbleElevationPx(size)
+        bubbleDockSide = Prefs.bubbleDockSide(this)
+        applyBubbleGeometry(p, image, size, bubbleDockSide, persist = true)
+        runCatching { windowManager.updateViewLayout(container, p) }
+        updateBubbleVisual(state)
         updateForeground(state)
     }
 
     private fun clampCurrentBubblePosition(persist: Boolean) {
-        val image = bubble ?: return
+        val container = bubble ?: return
+        val image = bubbleImage ?: return
         val p = params ?: return
-        val size = p.width.takeIf { it > 0 } ?: bubbleSizePx()
-        if (clampBubblePosition(p, size, persist)) {
-            runCatching { windowManager.updateViewLayout(image, p) }
+        val size = bubbleSizePx()
+        bubbleDockSide = Prefs.bubbleDockSide(this)
+        if (applyBubbleGeometry(p, image, size, bubbleDockSide, persist)) {
+            runCatching { windowManager.updateViewLayout(container, p) }
         }
     }
 
-    private fun clampBubblePosition(
-        p: WindowManager.LayoutParams,
-        size: Int,
-        persist: Boolean,
-    ): Boolean {
+    private fun bubbleUsableBounds(size: Int): IntArray {
         val metrics = windowManager.currentWindowMetrics
         val insets = metrics.windowInsets.getInsetsIgnoringVisibility(
             WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(),
         )
         val usableWidth = (metrics.bounds.width() - insets.left - insets.right).coerceAtLeast(size)
         val usableHeight = (metrics.bounds.height() - insets.top - insets.bottom).coerceAtLeast(size)
-        val margin = dp(BUBBLE_SAFE_MARGIN_DP)
+        return intArrayOf(usableWidth, usableHeight)
+    }
 
-        // Keep the top/bottom safe so the handle can never get trapped behind
-        // system UI, but let most of the bubble tuck past either side edge.
-        // A minimum visible handle remains draggable even at the smallest size.
-        val minimumVisible = maxOf(
-            dp(BUBBLE_MIN_VISIBLE_HANDLE_DP),
-            (size * BUBBLE_VISIBLE_EDGE_FRACTION).toInt(),
-        ).coerceAtMost(size)
-        val horizontalHidden = (size - minimumVisible).coerceAtLeast(0)
-        val minX = -horizontalHidden
-        val maxX = (usableWidth - size + horizontalHidden).coerceAtLeast(minX)
+    private fun bubbleVisibleHandlePx(size: Int): Int = maxOf(
+        dp(BUBBLE_MIN_VISIBLE_HANDLE_DP),
+        (size * BUBBLE_VISIBLE_EDGE_FRACTION).toInt(),
+    ).coerceAtMost(size)
+
+    private fun applyBubbleGeometry(
+        p: WindowManager.LayoutParams,
+        image: ImageView,
+        size: Int,
+        dockSide: BubbleDockSide,
+        persist: Boolean,
+    ): Boolean {
+        val (usableWidth, usableHeight) = bubbleUsableBounds(size)
+        val margin = dp(BUBBLE_SAFE_MARGIN_DP)
         val maxY = (usableHeight - size - margin).coerceAtLeast(0)
         val minY = if (maxY >= margin) margin else 0
-        val nextX = p.x.coerceIn(minX, maxX)
         val nextY = p.y.coerceIn(minY, maxY)
-        val changed = p.x != nextX || p.y != nextY
-        p.x = nextX
+        val visible = bubbleVisibleHandlePx(size)
+
+        val oldX = p.x
+        val oldY = p.y
+        val oldWidth = p.width
+        val oldHeight = p.height
+        when (dockSide) {
+            BubbleDockSide.LEFT -> {
+                p.width = visible
+                p.height = size
+                p.x = 0
+                image.translationX = (visible - size).toFloat()
+            }
+            BubbleDockSide.RIGHT -> {
+                p.width = visible
+                p.height = size
+                p.x = (usableWidth - visible).coerceAtLeast(0)
+                image.translationX = 0f
+            }
+            BubbleDockSide.NONE -> {
+                p.width = size
+                p.height = size
+                val maxX = (usableWidth - size - margin).coerceAtLeast(0)
+                val minX = if (maxX >= margin) margin else 0
+                p.x = p.x.coerceIn(minX, maxX)
+                image.translationX = 0f
+            }
+        }
         p.y = nextY
-        if (persist && (changed || Prefs.bubblePosition(this) != (nextX to nextY))) {
-            Prefs.setBubblePosition(this, nextX, nextY)
+        val changed = oldX != p.x || oldY != p.y || oldWidth != p.width || oldHeight != p.height
+        if (persist) {
+            Prefs.setBubblePosition(this, p.x, p.y)
+            Prefs.setBubbleDockSide(this, dockSide)
         }
         return changed
+    }
+
+    private fun clampBubbleDragPosition(p: WindowManager.LayoutParams, size: Int) {
+        val (usableWidth, usableHeight) = bubbleUsableBounds(size)
+        val margin = dp(BUBBLE_SAFE_MARGIN_DP)
+        val visible = bubbleVisibleHandlePx(size)
+        val hidden = (size - visible).coerceAtLeast(0)
+        val maxY = (usableHeight - size - margin).coerceAtLeast(0)
+        val minY = if (maxY >= margin) margin else 0
+        p.width = size
+        p.height = size
+        p.x = p.x.coerceIn(-hidden, (usableWidth - size + hidden).coerceAtLeast(-hidden))
+        p.y = p.y.coerceIn(minY, maxY)
+    }
+
+    private fun settleBubblePosition(
+        p: WindowManager.LayoutParams,
+        image: ImageView,
+        size: Int,
+        persist: Boolean,
+    ) {
+        val (usableWidth, _) = bubbleUsableBounds(size)
+        val nextDock = when {
+            p.x < 0 -> BubbleDockSide.LEFT
+            p.x > usableWidth - size -> BubbleDockSide.RIGHT
+            else -> BubbleDockSide.NONE
+        }
+        bubbleDockSide = nextDock
+        applyBubbleGeometry(p, image, size, nextDock, persist)
+    }
+
+    private fun undockBubbleForDrag(
+        p: WindowManager.LayoutParams,
+        container: View,
+        image: ImageView,
+        size: Int,
+    ) {
+        val previousDock = bubbleDockSide
+        if (previousDock == BubbleDockSide.NONE) return
+        val (usableWidth, _) = bubbleUsableBounds(size)
+        p.width = size
+        p.height = size
+        p.x = when (previousDock) {
+            BubbleDockSide.LEFT -> 0
+            BubbleDockSide.RIGHT -> (usableWidth - size).coerceAtLeast(0)
+            BubbleDockSide.NONE -> p.x
+        }
+        image.translationX = 0f
+        bubbleDockSide = BubbleDockSide.NONE
+        runCatching { windowManager.updateViewLayout(container, p) }
     }
 
     private fun hideBubble(persist: Boolean = true) {
         if (persist) Prefs.setBubbleVisible(this, false)
         bubble?.let { runCatching { windowManager.removeView(it) } }
         bubble = null
+        bubbleImage = null
         params = null
         updateForeground(state)
     }
@@ -578,12 +684,12 @@ class OverlayService : Service() {
             BubbleState.RECORDING -> 0xFFD14D4D.toInt()
             BubbleState.PROCESSING -> 0xFFB17A30.toInt()
         }
-        bubble?.background = GradientDrawable().apply {
+        bubbleImage?.background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(color)
         }
         val stateMultiplier = if (next == BubbleState.PROCESSING) PROCESSING_ALPHA_MULTIPLIER else 1f
-        bubble?.alpha = bubbleBaseAlpha() * stateMultiplier
+        bubbleImage?.alpha = bubbleBaseAlpha() * stateMultiplier
     }
 
     private fun updateForeground(next: BubbleState) {

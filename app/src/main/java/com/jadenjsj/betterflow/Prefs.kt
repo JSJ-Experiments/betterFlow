@@ -24,12 +24,24 @@ enum class NotificationPriority(val wireName: String, val displayName: String) {
     }
 }
 
+enum class BubbleDockSide(val wireName: String) {
+    NONE("none"),
+    LEFT("left"),
+    RIGHT("right");
+
+    companion object {
+        fun fromWireName(value: String?): BubbleDockSide =
+            entries.firstOrNull { it.wireName == value } ?: NONE
+    }
+}
+
 object Prefs {
     private const val NAME = "betterflow"
     private const val KEY_BACKEND = "input_backend"
     private const val KEY_BUBBLE_X = "bubble_x"
     private const val KEY_BUBBLE_Y = "bubble_y"
     private const val KEY_BUBBLE_VISIBLE = "bubble_visible"
+    private const val KEY_BUBBLE_DOCK_SIDE = "bubble_dock_side"
     private const val KEY_BUBBLE_SIZE_DP = "bubble_size_dp"
     private const val KEY_BUBBLE_OPACITY_PERCENT = "bubble_opacity_percent"
     private const val KEY_NOTIFICATION_PRIORITY = "notification_priority"
@@ -65,6 +77,13 @@ object Prefs {
 
     fun setBubblePosition(context: Context, x: Int, y: Int) {
         prefs(context).edit().putInt(KEY_BUBBLE_X, x).putInt(KEY_BUBBLE_Y, y).apply()
+    }
+
+    fun bubbleDockSide(context: Context): BubbleDockSide =
+        BubbleDockSide.fromWireName(prefs(context).getString(KEY_BUBBLE_DOCK_SIDE, BubbleDockSide.NONE.wireName))
+
+    fun setBubbleDockSide(context: Context, side: BubbleDockSide) {
+        prefs(context).edit().putString(KEY_BUBBLE_DOCK_SIDE, side.wireName).apply()
     }
 
     fun bubbleVisible(context: Context): Boolean {
