@@ -82,13 +82,14 @@ class BetterFlowXposedModule(
 
     private fun installReceiver(service: InputMethodService) {
         currentIme = WeakReference(service)
-        if (service.packageName == GBOARD_PACKAGE) bindBridge(service)
+        if (service.packageName == GBOARD_PACKAGE) requestBridgeSnapshot(service)
         synchronized(receivers) {
             if (receivers.containsKey(service)) return
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context?, intent: Intent?) {
                     when (intent?.action) {
                         InputInjector.ACTION_VOICE_STATE -> {
+                            pendingToggle = false
                             voiceState = VoiceState.fromWire(intent.getStringExtra(InputInjector.EXTRA_VOICE_STATE))
                             applyVoiceStateVisual(service, voiceState)
                             log("$TAG voice state <- ${voiceState.wireName}")
@@ -523,20 +524,65 @@ class BetterFlowXposedModule(
         }
     }
 
-    private fun scheduleBridgeStateSync(service: InputMethodService) {
-        BRIDGE_STATE_SYNC_DELAYS_MS.forEach { delayMs ->
-            Handler(service.mainLooper).postDelayed({ syncBridgeState() }, delayMs)
+    private fun sendBridgeBroadcast(
+        service: InputMethodService,
+        command: String,
+        onResult: (Int, Bundle?) -> Unit,
+    ): Boolean {
+        val receiver = object : ResultReceiver(null) {
+            override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
+                Handler(service.mainLooper).post { onResult(resultCode, resultData) }
+            }
+        }
+        val intent = Intent(GBOARD_BRIDGE_BROADCAST_ACTION)
+            .setClassName(BETTERFLOW_PACKAGE, GBOARD_BRIDGE_RECEIVER)
+            .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+            .putExtra(GBOARD_BRIDGE_EXTRA_COMMAND, command)
+            .putExtra(GBOARD_BRIDGE_EXTRA_RESULT_RECEIVER, receiver)
+        return runCatching {
+            service.sendBroadcast(intent)
+            true
+        }.getOrElse {
+            log("$TAG Gboard bridge broadcast failed: ${it.message}", it)
+            false
         }
     }
 
-    private fun schedulePendingToggleTimeout(service: InputMethodService, previous: VoiceState) {
+    private fun requestBridgeSnapshot(service: InputMethodService) {
+        sendBridgeBroadcast(service, GBOARD_BRIDGE_COMMAND_SNAPSHOT) { resultCode, data ->
+            if (resultCode != GBOARD_BRIDGE_RESULT_OK || data == null) return@sendBridgeBroadcast
+            gboardMicEnabled = data.getBoolean(GBOARD_BRIDGE_EXTRA_GBOARD_MIC_ENABLED, true)
+            voiceState = VoiceState.fromWire(data.getString(GBOARD_BRIDGE_EXTRA_VOICE_STATE))
+            if (gboardMicEnabled) {
+                locateGboardMic(service)
+                applyVoiceStateVisual(service, voiceState)
+            } else {
+                micGestureActive = false
+                micPressed = false
+                restoreMicVisual(micKeyView?.get())
+            }
+            log("$TAG Gboard bridge snapshot state=${voiceState.wireName} enabled=$gboardMicEnabled")
+        }
+    }
+
+    private fun scheduleBridgeStateSync(service: InputMethodService) {
+        BRIDGE_STATE_SYNC_DELAYS_MS.forEach { delayMs ->
+            Handler(service.mainLooper).postDelayed({ requestBridgeSnapshot(service) }, delayMs)
+        }
+    }
+
+    private fun schedulePendingToggleTimeout(
+        service: InputMethodService,
+        previous: VoiceState,
+        generation: Long,
+    ) {
         Handler(service.mainLooper).postDelayed({
-            if (!pendingToggle) return@postDelayed
+            if (!pendingToggle || bridgeRequestGeneration != generation) return@postDelayed
             pendingToggle = false
             voiceState = previous
             applyVoiceStateVisual(service, voiceState)
-            log("$TAG Gboard Binder toggle timed out; restored pre-tap state=${previous.wireName}")
-            bridgeConnection?.let { clearBridgeConnection(service, it) }
+            log("$TAG Gboard bridge toggle timed out; restored pre-tap state=${previous.wireName}")
+            requestBridgeSnapshot(service)
         }, BRIDGE_TOGGLE_TIMEOUT_MS)
     }
 
@@ -545,28 +591,48 @@ class BetterFlowXposedModule(
             log("$TAG cannot trigger betterFlow: no live IME service")
             return false
         }
-        if (bridgeBinder?.isBinderAlive == true && transactToggleFromGboard()) {
-            scheduleBridgeStateSync(service)
-            log("$TAG authenticated Gboard PendingIntent toggle sent")
-            return true
-        }
-
-        bridgeBinder = null
-        bridgeConnection?.let { clearBridgeConnection(service, it) }
+        val generation = ++bridgeRequestGeneration
         pendingToggle = true
-        bindBridge(service)
-        schedulePendingToggleTimeout(service, previous)
-        if (bridgeBinder?.isBinderAlive == true && pendingToggle) {
-            pendingToggle = false
-            if (transactToggleFromGboard()) {
-                scheduleBridgeStateSync(service)
-                log("$TAG authenticated Gboard PendingIntent toggle sent after rebind")
-                return true
+        val sent = sendBridgeBroadcast(service, GBOARD_BRIDGE_COMMAND_TOGGLE) { resultCode, data ->
+            if (bridgeRequestGeneration != generation) return@sendBridgeBroadcast
+            if (resultCode != GBOARD_BRIDGE_RESULT_OK || data == null) {
+                pendingToggle = false
+                voiceState = previous
+                applyVoiceStateVisual(service, voiceState)
+                log("$TAG authenticated Gboard bridge rejected toggle request")
+                return@sendBridgeBroadcast
             }
+            val pendingIntent = if (Build.VERSION.SDK_INT >= 33) {
+                data.getParcelable(GBOARD_BRIDGE_EXTRA_TOGGLE_PENDING_INTENT, PendingIntent::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                data.getParcelable(GBOARD_BRIDGE_EXTRA_TOGGLE_PENDING_INTENT)
+            }
+            if (pendingIntent == null) {
+                pendingToggle = false
+                voiceState = previous
+                applyVoiceStateVisual(service, voiceState)
+                log("$TAG authenticated Gboard bridge returned no toggle PendingIntent")
+                return@sendBridgeBroadcast
+            }
+            runCatching { pendingIntent.send() }
+                .onSuccess {
+                    log("$TAG authenticated Gboard broadcast PendingIntent toggle sent")
+                    scheduleBridgeStateSync(service)
+                }
+                .onFailure {
+                    pendingToggle = false
+                    voiceState = previous
+                    applyVoiceStateVisual(service, voiceState)
+                    log("$TAG Gboard broadcast PendingIntent send failed: ${it.message}", it)
+                }
         }
-        // A successful bind request can complete asynchronously. The timeout above
-        // rolls the optimistic visual back if the bridge never actually toggles.
-        return bridgeConnection != null
+        if (!sent) {
+            pendingToggle = false
+            return false
+        }
+        schedulePendingToggleTimeout(service, previous, generation)
+        return true
     }
 
     private fun clearMicStateOverlay(mic: View?) {
@@ -671,9 +737,8 @@ class BetterFlowXposedModule(
                 val service = callback.thisObject as? InputMethodService ?: return
                 Handler(service.mainLooper).postDelayed({
                     runCatching {
-                        activeModule?.bindBridge(service)
                         activeModule?.locateGboardMic(service)
-                        activeModule?.syncBridgeState()
+                        activeModule?.requestBridgeSnapshot(service)
                     }.onFailure { activeModule?.log("$TAG Gboard mic discovery failed: ${it.message}", it) }
                 }, 350L)
             }
@@ -697,6 +762,16 @@ class BetterFlowXposedModule(
         private const val GBOARD_PACKAGE = "com.google.android.inputmethod.latin"
         private const val BETTERFLOW_PACKAGE = "com.jadenjsj.betterflow"
         private const val GBOARD_BRIDGE_SERVICE = "com.jadenjsj.betterflow.GboardBridgeService"
+        private const val GBOARD_BRIDGE_RECEIVER = "com.jadenjsj.betterflow.GboardBridgeReceiver"
+        private const val GBOARD_BRIDGE_BROADCAST_ACTION = "com.jadenjsj.betterflow.action.GBOARD_BRIDGE"
+        private const val GBOARD_BRIDGE_COMMAND_SNAPSHOT = "snapshot"
+        private const val GBOARD_BRIDGE_COMMAND_TOGGLE = "toggle_pending_intent"
+        private const val GBOARD_BRIDGE_EXTRA_COMMAND = "bridge_command"
+        private const val GBOARD_BRIDGE_EXTRA_RESULT_RECEIVER = "bridge_result_receiver"
+        private const val GBOARD_BRIDGE_EXTRA_VOICE_STATE = "bridge_voice_state"
+        private const val GBOARD_BRIDGE_EXTRA_GBOARD_MIC_ENABLED = "bridge_gboard_mic_enabled"
+        private const val GBOARD_BRIDGE_EXTRA_TOGGLE_PENDING_INTENT = "bridge_toggle_pending_intent"
+        private const val GBOARD_BRIDGE_RESULT_OK = 1
         private const val GBOARD_BRIDGE_DESCRIPTOR = "com.jadenjsj.betterflow.GboardBridge"
         private const val GBOARD_TRANSACTION_TOGGLE = IBinder.FIRST_CALL_TRANSACTION
         private const val GBOARD_TRANSACTION_GET_STATE = IBinder.FIRST_CALL_TRANSACTION + 1
@@ -721,6 +796,7 @@ class BetterFlowXposedModule(
         @Volatile private var bridgeBinder: IBinder? = null
         @Volatile private var bridgeConnection: ServiceConnection? = null
         @Volatile private var pendingToggle = false
+        @Volatile private var bridgeRequestGeneration = 0L
         @Volatile private var gboardMicEnabled = true
         @Volatile private var micKeyView: WeakReference<View>? = null
         @Volatile private var micOriginalContentDescription: CharSequence? = null
