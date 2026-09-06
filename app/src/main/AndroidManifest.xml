@@ -12,7 +12,11 @@
     <permission
         android:name="com.jadenjsj.betterflow.permission.COMMIT_TEXT"
         android:protectionLevel="signature" />
+    <permission
+        android:name="com.jadenjsj.betterflow.permission.CONTROL_SERVICE"
+        android:protectionLevel="signature" />
     <uses-permission android:name="com.jadenjsj.betterflow.permission.COMMIT_TEXT" />
+    <uses-permission android:name="com.jadenjsj.betterflow.permission.CONTROL_SERVICE" />
 
     <application
         android:allowBackup="false"
@@ -34,8 +38,9 @@
         <activity
             android:name=".WakeActivity"
             android:excludeFromRecents="true"
-            android:exported="false"
+            android:exported="true"
             android:noHistory="true"
+            android:permission="com.jadenjsj.betterflow.permission.CONTROL_SERVICE"
             android:theme="@android:style/Theme.NoDisplay" />
 
         <service
@@ -44,8 +49,9 @@
 
         <service
             android:name=".OverlayService"
-            android:exported="false"
-            android:foregroundServiceType="microphone|specialUse">
+            android:exported="true"
+            android:foregroundServiceType="microphone|specialUse"
+            android:permission="com.jadenjsj.betterflow.permission.CONTROL_SERVICE">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Persistent user-invoked voice typing bubble" />

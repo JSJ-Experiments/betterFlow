@@ -60,15 +60,21 @@ ensure_permissions() {
   pm grant "$PKG" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
 }
 
+unstop_app() {
+  cmd package unstop --user 0 "$PKG" >/dev/null 2>&1 || \
+    cmd package set-stopped-state "$PKG" false >/dev/null 2>&1 || true
+}
+
 start_app() {
+  unstop_app
   if am start-foreground-service --user 0 -a "$ACTION_WAKE" -n "$SERVICE" >/dev/null 2>&1; then
     return 0
   fi
   if am startservice --user 0 -a "$ACTION_WAKE" -n "$SERVICE" >/dev/null 2>&1; then
     return 0
   fi
-  # HyperOS lacks `cmd package set-stopped-state`; if the app was force-stopped,
-  # a no-display Activity launch clears that state and wakes OverlayService.
+  # Fallback for ROMs that still reject a direct protected service start.
+  # This no-display Activity immediately starts OverlayService and finishes.
   am start --user 0 --include-stopped-packages -n "$WAKE_ACTIVITY" >/dev/null 2>&1 || true
 }
 

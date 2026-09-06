@@ -235,8 +235,13 @@ class OverlayService : Service() {
         )
         val usableWidth = (metrics.bounds.width() - insets.left - insets.right).coerceAtLeast(size)
         val usableHeight = (metrics.bounds.height() - insets.top - insets.bottom).coerceAtLeast(size)
-        val nextX = p.x.coerceIn(0, (usableWidth - size).coerceAtLeast(0))
-        val nextY = p.y.coerceIn(0, (usableHeight - size).coerceAtLeast(0))
+        val margin = dp(BUBBLE_SAFE_MARGIN_DP)
+        val maxX = (usableWidth - size - margin).coerceAtLeast(0)
+        val maxY = (usableHeight - size - margin).coerceAtLeast(0)
+        val minX = if (maxX >= margin) margin else 0
+        val minY = if (maxY >= margin) margin else 0
+        val nextX = p.x.coerceIn(minX, maxX)
+        val nextY = p.y.coerceIn(minY, maxY)
         val changed = p.x != nextX || p.y != nextY
         p.x = nextX
         p.y = nextY
@@ -623,6 +628,7 @@ class OverlayService : Service() {
         private const val STREAM_QUEUE_CAPACITY = 128
         private const val STREAM_OPEN_TIMEOUT_MS = 20_000L
         private const val STREAM_RESULT_TIMEOUT_MS = 30_000L
+        private const val BUBBLE_SAFE_MARGIN_DP = 12
         private const val TAG = "betterFlow/Voice"
     }
 }
