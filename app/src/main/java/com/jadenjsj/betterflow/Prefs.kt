@@ -117,6 +117,7 @@ object Prefs {
     fun setGboardMicEnabled(context: Context, enabled: Boolean) {
         ensureVoiceTriggerDefaults(context)
         prefs(context).edit().putBoolean(KEY_GBOARD_MIC_ENABLED, enabled).apply()
+        XposedRemoteAuthSync.syncFromLocal()
     }
 
     fun legacyTranscription(context: Context): Boolean =
@@ -124,6 +125,7 @@ object Prefs {
 
     fun setLegacyTranscription(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_LEGACY_TRANSCRIPTION, enabled).apply()
+        XposedRemoteAuthSync.syncFromLocal()
     }
 
     fun streamingApiKey(context: Context): String? =
@@ -135,6 +137,7 @@ object Prefs {
         if (normalized.isEmpty()) editor.remove(KEY_STREAMING_API_KEY)
         else editor.putString(KEY_STREAMING_API_KEY, normalized)
         editor.apply()
+        XposedRemoteAuthSync.syncFromLocal()
     }
 
     const val MIN_BUBBLE_SIZE_DP = 36

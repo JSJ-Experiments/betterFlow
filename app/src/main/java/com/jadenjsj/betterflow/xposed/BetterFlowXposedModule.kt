@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
+import android.content.SharedPreferences
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
@@ -23,7 +24,14 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import com.jadenjsj.betterflow.AudioRecorderController
+import com.jadenjsj.betterflow.AuthStore
+import com.jadenjsj.betterflow.BuildConfig
 import com.jadenjsj.betterflow.InputInjector
+import com.jadenjsj.betterflow.WisprClient
+import com.jadenjsj.betterflow.WisprSession
+import com.jadenjsj.betterflow.WisprSessionStore
+import com.jadenjsj.betterflow.WisprStreamingClient
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedInterface.AfterHookCallback
 import io.github.libxposed.api.XposedInterface.BeforeHookCallback
@@ -33,9 +41,14 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import io.github.libxposed.api.annotations.AfterInvocation
 import io.github.libxposed.api.annotations.BeforeInvocation
 import io.github.libxposed.api.annotations.XposedHooker
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import java.lang.ref.WeakReference
+import java.util.ArrayDeque
 import java.util.LinkedHashMap
 import java.util.WeakHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
@@ -45,6 +58,15 @@ class BetterFlowXposedModule(
 ) : XposedModule(base, moduleParam) {
 
     private val recentCommitRequests = LinkedHashMap<String, Long>()
+    private val hookRecorder = AudioRecorderController()
+    private val hookStreamLock = Any()
+    private val hookQueuedAudio = ArrayDeque<ByteArray>()
+    @Volatile private var hookStreamSession: WisprStreamingClient.Session? = null
+    @Volatile private var hookStreamFailure: Throwable? = null
+    @Volatile private var hookStreamReady = CountDownLatch(0)
+    @Volatile private var hookClients: HookClients? = null
+    @Volatile private var hookOperationGeneration = 0L
+    @Volatile private var hookOwnsVoiceSession = false
     @Volatile private var voiceState = VoiceState.IDLE
 
     init {
@@ -76,20 +98,22 @@ class BetterFlowXposedModule(
                 ViewGroup::class.java.getDeclaredMethod("dispatchTouchEvent", MotionEvent::class.java),
                 GboardTouchHooker::class.java,
             )
-            log("$TAG Gboard mic interception armed")
+            prepareHookConfig()
+            log("$TAG Gboard mic interception armed (in-process streaming primary)")
         }
         log("$TAG InputMethodService bridge armed for ${param.packageName}")
     }
 
     private fun installReceiver(service: InputMethodService) {
         currentIme = WeakReference(service)
-        if (service.packageName == GBOARD_PACKAGE) requestBridgeSnapshot(service)
+        if (service.packageName == GBOARD_PACKAGE) prepareHookConfig()
         synchronized(receivers) {
             if (receivers.containsKey(service)) return
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context?, intent: Intent?) {
                     when (intent?.action) {
                         InputInjector.ACTION_VOICE_STATE -> {
+                            if (hookOwnsVoiceSession) return
                             pendingToggle = false
                             voiceState = VoiceState.fromWire(intent.getStringExtra(InputInjector.EXTRA_VOICE_STATE))
                             applyVoiceStateVisual(service, voiceState)
@@ -181,6 +205,7 @@ class BetterFlowXposedModule(
             }
         }
         if (currentIme?.get() === service) {
+            cancelHookVoice("IME destroyed")
             unbindBridge(service)
             currentIme = null
         }
@@ -325,24 +350,21 @@ class BetterFlowXposedModule(
                 micGestureActive = false
                 micPressed = false
                 callback.returnAndSkip(true)
-                val previous = voiceState
-                if (previous == VoiceState.PROCESSING) {
-                    voiceState = VoiceState.IDLE
-                    setMicVisual(voiceState)
-                    target?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    log("$TAG Gboard mic gesture UP while processing -> cancel")
-                    if (!triggerBetterFlow(previous)) {
-                        voiceState = previous
-                        setMicVisual(voiceState)
+                when (voiceState) {
+                    VoiceState.IDLE -> {
+                        log("$TAG Gboard mic gesture UP -> in-process recording start")
+                        startHookRecording(service = currentIme?.get() ?: return)
                     }
-                    return
-                }
-                voiceState = if (previous == VoiceState.IDLE) VoiceState.RECORDING else VoiceState.PROCESSING
-                setMicVisual(voiceState)
-                log("$TAG Gboard mic gesture UP -> betterFlow toggle, optimistic=${voiceState.wireName}")
-                if (!triggerBetterFlow(previous)) {
-                    voiceState = previous
-                    setMicVisual(voiceState)
+                    VoiceState.RECORDING -> {
+                        log("$TAG Gboard mic gesture UP -> in-process stream commit")
+                        stopHookRecordingAndTranscribe(currentIme?.get() ?: return)
+                    }
+                    VoiceState.PROCESSING -> {
+                        target?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        log("$TAG Gboard mic gesture UP while processing -> in-process cancel")
+                        cancelHookVoice("cancelled from Gboard mic")
+                        applyVoiceStateVisual(currentIme?.get() ?: return, VoiceState.IDLE)
+                    }
                 }
             }
             MotionEvent.ACTION_CANCEL -> {
@@ -354,6 +376,258 @@ class BetterFlowXposedModule(
                 log("$TAG Gboard mic gesture CANCEL")
             }
         }
+    }
+
+    private data class HookClients(
+        val wispr: WisprClient,
+        val streaming: WisprStreamingClient,
+        val legacyOnly: Boolean,
+    )
+
+    private class HookSessionStore(private val prefs: SharedPreferences) : WisprSessionStore {
+        @Volatile private var refreshedInMemory: WisprSession? = null
+
+        override fun load(): WisprSession? {
+            val remote = remoteSession()
+            val memory = refreshedInMemory
+            if (memory == null) return remote
+            if (remote == null) return memory
+            val memoryExpiry = memory.expiresAt ?: AuthStore.jwtExpiresAt(memory.accessToken) ?: 0L
+            val remoteExpiry = remote.expiresAt ?: AuthStore.jwtExpiresAt(remote.accessToken) ?: 0L
+            return if (memoryExpiry >= remoteExpiry) memory else remote
+        }
+
+        override fun save(session: WisprSession) {
+            // Hook-side LSPosed remote prefs are read-only. Keep any refreshed
+            // token in this Gboard process; the companion app remains persistent owner.
+            refreshedInMemory = session
+        }
+
+        private fun remoteSession(): WisprSession? {
+            val access = prefs.getString(REMOTE_KEY_ACCESS, null)?.takeIf { it.isNotBlank() } ?: return null
+            return WisprSession(
+                email = prefs.getString(REMOTE_KEY_EMAIL, "wispr-user") ?: "wispr-user",
+                accessToken = access,
+                refreshToken = prefs.getString(REMOTE_KEY_REFRESH, null)?.takeIf { it.isNotBlank() },
+                expiresAt = prefs.getLong(REMOTE_KEY_EXPIRES, 0L).takeIf { it > 0L }
+                    ?: AuthStore.jwtExpiresAt(access),
+            )
+        }
+    }
+
+    private fun remoteHookPreferences(): SharedPreferences? = runCatching {
+        getRemotePreferences(REMOTE_AUTH_GROUP)
+    }.onFailure {
+        log("$TAG could not open LSPosed remote preferences: ${it.message}", it)
+    }.getOrNull()
+
+    private fun prepareHookConfig() {
+        val prefs = remoteHookPreferences() ?: return
+        gboardMicEnabled = prefs.getBoolean(REMOTE_KEY_GBOARD_MIC_ENABLED, true)
+        log("$TAG remote config loaded gboardMicEnabled=$gboardMicEnabled")
+    }
+
+    private fun createHookClients(): HookClients {
+        val prefs = remoteHookPreferences()
+            ?: error("LSPosed remote settings are unavailable; open betterFlow once")
+        val store = HookSessionStore(prefs)
+        check(store.load() != null) { "Wispr session is not synced; open betterFlow once" }
+        val wispr = WisprClient(store)
+        val remoteKey = prefs.getString(REMOTE_KEY_STREAMING_API_KEY, null)?.trim().orEmpty()
+        val apiKey = remoteKey.ifBlank { BuildConfig.WISPR_BASETEN_API_KEY.trim() }
+        return HookClients(
+            wispr = wispr,
+            streaming = WisprStreamingClient(wispr) { apiKey },
+            legacyOnly = prefs.getBoolean(REMOTE_KEY_LEGACY_TRANSCRIPTION, false),
+        )
+    }
+
+    private fun startHookRecording(service: InputMethodService) {
+        if (hookOwnsVoiceSession || hookRecorder.isRecording()) return
+        val clients = runCatching(::createHookClients).getOrElse { t ->
+            log("$TAG cannot start in-process voice: ${t.message}", t)
+            android.widget.Toast.makeText(service, "betterFlow: ${t.message}", android.widget.Toast.LENGTH_LONG).show()
+            voiceState = VoiceState.IDLE
+            applyVoiceStateVisual(service, voiceState)
+            return
+        }
+
+        val generation = ++hookOperationGeneration
+        hookOwnsVoiceSession = true
+        hookClients = clients
+        hookStreamSession = null
+        hookStreamFailure = null
+        hookStreamReady = CountDownLatch(if (clients.legacyOnly) 0 else 1)
+        synchronized(hookStreamLock) { hookQueuedAudio.clear() }
+        voiceState = VoiceState.RECORDING
+        applyVoiceStateVisual(service, voiceState)
+
+        try {
+            if (clients.legacyOnly) {
+                hookRecorder.start()
+                log("$TAG in-process legacy recording started generation=$generation")
+                return
+            }
+
+            hookRecorder.start(onPcmChunk = { chunk ->
+                if (hookOperationGeneration != generation || !hookOwnsVoiceSession) return@start
+                synchronized(hookStreamLock) {
+                    val session = hookStreamSession
+                    if (session != null) {
+                        session.sendAudio(chunk)
+                    } else {
+                        hookQueuedAudio.addLast(chunk)
+                    }
+                }
+            })
+            log("$TAG in-process recording started; opening Wispr stream generation=$generation")
+            Thread({
+                var opened: WisprStreamingClient.Session? = null
+                try {
+                    opened = runBlocking {
+                        withTimeout(HOOK_STREAM_OPEN_TIMEOUT_MS) {
+                            clients.streaming.open(onPartial = { partial ->
+                                log("$TAG in-process Wispr partial chars=${partial.length}")
+                            })
+                        }
+                    }
+                    synchronized(hookStreamLock) {
+                        if (hookOperationGeneration != generation || !hookOwnsVoiceSession) {
+                            opened.cancel("stale Gboard voice operation")
+                            return@synchronized
+                        }
+                        hookStreamSession = opened
+                        while (hookQueuedAudio.isNotEmpty()) {
+                            opened.sendAudio(hookQueuedAudio.removeFirst())
+                        }
+                    }
+                    log("$TAG in-process Wispr stream ready generation=$generation")
+                } catch (t: Throwable) {
+                    if (hookOperationGeneration == generation) {
+                        hookStreamFailure = t
+                        log("$TAG in-process Wispr stream open failed: ${t.message}", t)
+                    } else {
+                        opened?.cancel("stale Gboard voice operation")
+                    }
+                } finally {
+                    hookStreamReady.countDown()
+                }
+            }, "betterflow-gboard-stream-open").start()
+        } catch (t: Throwable) {
+            log("$TAG in-process recording start failed: ${t.message}", t)
+            cancelHookVoice("recording start failed")
+            android.widget.Toast.makeText(service, "betterFlow mic failed: ${t.message}", android.widget.Toast.LENGTH_LONG).show()
+            applyVoiceStateVisual(service, VoiceState.IDLE)
+        }
+    }
+
+    private fun stopHookRecordingAndTranscribe(service: InputMethodService) {
+        if (!hookOwnsVoiceSession || voiceState != VoiceState.RECORDING) return
+        val generation = hookOperationGeneration
+        val clients = hookClients ?: run {
+            cancelHookVoice("missing hook clients")
+            return
+        }
+        voiceState = VoiceState.PROCESSING
+        applyVoiceStateVisual(service, voiceState)
+        val pcm = hookRecorder.stopAndGetPcm()
+        if (pcm.isEmpty()) {
+            finishHookVoice(service, generation, null, IllegalStateException("no microphone audio captured"))
+            return
+        }
+
+        Thread({
+            var text: String? = null
+            var error: Throwable? = null
+            try {
+                text = if (clients.legacyOnly) {
+                    runBlocking { clients.wispr.transcribeLegacyPcm(pcm) }.trim()
+                } else {
+                    runCatching { transcribeHookStream(generation) }
+                        .getOrElse { streamError ->
+                            log("$TAG in-process streaming failed; using legacy fallback: ${streamError.message}", streamError)
+                            runBlocking { clients.wispr.transcribeLegacyPcm(pcm) }
+                        }
+                        .trim()
+                }
+                check(text.isNotBlank()) { "Wispr returned empty text" }
+            } catch (t: Throwable) {
+                error = t
+            }
+            Handler(service.mainLooper).post {
+                finishHookVoice(service, generation, text, error)
+            }
+        }, "betterflow-gboard-transcribe").start()
+    }
+
+    private fun transcribeHookStream(generation: Long): String {
+        if (!hookStreamReady.await(HOOK_STREAM_OPEN_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            throw IllegalStateException("Wispr stream open timed out")
+        }
+        if (hookOperationGeneration != generation || !hookOwnsVoiceSession) {
+            throw IllegalStateException("Gboard voice operation was cancelled")
+        }
+        hookStreamFailure?.let { throw it }
+        val session = synchronized(hookStreamLock) {
+            val current = hookStreamSession ?: throw IllegalStateException("Wispr stream did not open")
+            while (hookQueuedAudio.isNotEmpty()) current.sendAudio(hookQueuedAudio.removeFirst())
+            current.commit()
+            current
+        }
+        val result = runBlocking {
+            withTimeout(HOOK_STREAM_RESULT_TIMEOUT_MS) { session.awaitResult() }
+        }
+        return result.text
+    }
+
+    private fun finishHookVoice(
+        service: InputMethodService,
+        generation: Long,
+        text: String?,
+        error: Throwable?,
+    ) {
+        if (hookOperationGeneration != generation) return
+        if (error != null) {
+            log("$TAG in-process transcription failed: ${error.message}", error)
+            android.widget.Toast.makeText(service, "betterFlow failed: ${error.message}", android.widget.Toast.LENGTH_LONG).show()
+        } else if (!text.isNullOrBlank()) {
+            val connection = service.currentInputConnection
+            val ok = runCatching { connection != null && connection.commitText(text, 1) }.getOrDefault(false)
+            if (ok) {
+                log("$TAG in-process transcription committed through Gboard InputConnection (${text.length} chars)")
+            } else {
+                log("$TAG transcription ready but Gboard InputConnection is unavailable")
+                android.widget.Toast.makeText(service, "betterFlow: text ready but input field was lost", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+        clearHookVoiceState(cancelSession = false)
+        voiceState = VoiceState.IDLE
+        applyVoiceStateVisual(service, voiceState)
+    }
+
+    private fun cancelHookVoice(reason: String) {
+        ++hookOperationGeneration
+        if (hookRecorder.isRecording()) runCatching { hookRecorder.stopAndDiscard() }
+        hookClients?.wispr?.cancelActiveTranscription()
+        clearHookVoiceState(cancelSession = true, reason = reason)
+        voiceState = VoiceState.IDLE
+        hookOwnsVoiceSession = false
+        currentIme?.get()?.let { applyVoiceStateVisual(it, voiceState) }
+        log("$TAG in-process voice cancelled: $reason")
+    }
+
+    private fun clearHookVoiceState(cancelSession: Boolean, reason: String = "operation complete") {
+        val session = synchronized(hookStreamLock) {
+            val current = hookStreamSession
+            hookStreamSession = null
+            hookQueuedAudio.clear()
+            current
+        }
+        if (cancelSession) session?.cancel(reason)
+        hookStreamFailure = null
+        hookClients = null
+        hookOwnsVoiceSession = false
+        hookStreamReady.countDown()
     }
 
     private fun bindBridge(service: InputMethodService) {
@@ -805,8 +1079,8 @@ class BetterFlowXposedModule(
                 val service = callback.thisObject as? InputMethodService ?: return
                 Handler(service.mainLooper).postDelayed({
                     runCatching {
+                        activeModule?.prepareHookConfig()
                         activeModule?.locateGboardMic(service)
-                        activeModule?.requestBridgeSnapshot(service)
                     }.onFailure { activeModule?.log("$TAG Gboard mic discovery failed: ${it.message}", it) }
                 }, 350L)
             }
@@ -854,6 +1128,16 @@ class BetterFlowXposedModule(
         private const val GBOARD_TRANSACTION_GET_STATE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val GBOARD_TRANSACTION_GET_CONFIG = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val GBOARD_TRANSACTION_GET_TOGGLE_PENDING_INTENT = IBinder.FIRST_CALL_TRANSACTION + 3
+        private const val REMOTE_AUTH_GROUP = "betterflow_auth"
+        private const val REMOTE_KEY_EMAIL = "email"
+        private const val REMOTE_KEY_ACCESS = "access_token"
+        private const val REMOTE_KEY_REFRESH = "refresh_token"
+        private const val REMOTE_KEY_EXPIRES = "expires_at"
+        private const val REMOTE_KEY_STREAMING_API_KEY = "streaming_api_key"
+        private const val REMOTE_KEY_GBOARD_MIC_ENABLED = "gboard_mic_enabled"
+        private const val REMOTE_KEY_LEGACY_TRANSCRIPTION = "legacy_transcription"
+        private const val HOOK_STREAM_OPEN_TIMEOUT_MS = 20_000L
+        private const val HOOK_STREAM_RESULT_TIMEOUT_MS = 30_000L
         private const val COMMIT_DEDUPE_TTL_MS = 10_000L
         private val MIC_REACQUIRE_DELAYS_MS = longArrayOf(0L, 60L, 140L, 280L, 520L, 900L)
         private val BRIDGE_STATE_SYNC_DELAYS_MS = longArrayOf(120L, 350L, 900L)

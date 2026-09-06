@@ -19,9 +19,16 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-class WisprStreamingClient(context: Context) {
-    private val appContext = context.applicationContext
-    private val wispr = WisprClient(appContext)
+class WisprStreamingClient(
+    private val wispr: WisprClient,
+    private val apiKeyProvider: () -> String,
+) {
+    constructor(context: Context) : this(
+        wispr = WisprClient(context.applicationContext),
+        apiKeyProvider = {
+            Prefs.streamingApiKey(context.applicationContext) ?: BuildConfig.WISPR_BASETEN_API_KEY.trim()
+        },
+    )
 
     data class Result(
         val text: String,
@@ -35,7 +42,7 @@ class WisprStreamingClient(context: Context) {
         modelId: String = DEFAULT_MODEL_ID,
         onPartial: (String) -> Unit = {},
     ): Session {
-        val apiKey = Prefs.streamingApiKey(appContext) ?: BuildConfig.WISPR_BASETEN_API_KEY.trim()
+        val apiKey = apiKeyProvider().trim()
         Log.i(TAG, "opening Wispr stream: model=$modelId keyPresent=${apiKey.isNotBlank()}")
         if (apiKey.isBlank()) {
             throw IllegalStateException("Wispr streaming credential is unavailable in this build")
