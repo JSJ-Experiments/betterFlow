@@ -534,11 +534,22 @@ class BetterFlowXposedModule(
                 Handler(service.mainLooper).post { onResult(resultCode, resultData) }
             }
         }
+        // HyperOS reports BroadcastReceiver.sentFromUid as -1 for this explicit
+        // cross-app broadcast. Attach a PendingIntent created inside Gboard as an
+        // unforgeable framework-issued proof of the caller instead. Its creator
+        // UID/package are assigned by Android, not by data in the Intent.
+        val senderProof = PendingIntent.getBroadcast(
+            service,
+            (SystemClock.elapsedRealtimeNanos() and 0x7fffffffL).toInt(),
+            Intent(GBOARD_BRIDGE_PROOF_ACTION).setPackage(GBOARD_PACKAGE),
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
+        )
         val intent = Intent(GBOARD_BRIDGE_BROADCAST_ACTION)
             .setClassName(BETTERFLOW_PACKAGE, GBOARD_BRIDGE_RECEIVER)
             .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
             .putExtra(GBOARD_BRIDGE_EXTRA_COMMAND, command)
             .putExtra(GBOARD_BRIDGE_EXTRA_RESULT_RECEIVER, receiver)
+            .putExtra(GBOARD_BRIDGE_EXTRA_SENDER_PROOF, senderProof)
         return runCatching {
             service.sendBroadcast(intent)
             true
@@ -764,10 +775,12 @@ class BetterFlowXposedModule(
         private const val GBOARD_BRIDGE_SERVICE = "com.jadenjsj.betterflow.GboardBridgeService"
         private const val GBOARD_BRIDGE_RECEIVER = "com.jadenjsj.betterflow.GboardBridgeReceiver"
         private const val GBOARD_BRIDGE_BROADCAST_ACTION = "com.jadenjsj.betterflow.action.GBOARD_BRIDGE"
+        private const val GBOARD_BRIDGE_PROOF_ACTION = "com.jadenjsj.betterflow.action.GBOARD_SENDER_PROOF"
         private const val GBOARD_BRIDGE_COMMAND_SNAPSHOT = "snapshot"
         private const val GBOARD_BRIDGE_COMMAND_TOGGLE = "toggle_pending_intent"
         private const val GBOARD_BRIDGE_EXTRA_COMMAND = "bridge_command"
         private const val GBOARD_BRIDGE_EXTRA_RESULT_RECEIVER = "bridge_result_receiver"
+        private const val GBOARD_BRIDGE_EXTRA_SENDER_PROOF = "bridge_sender_proof"
         private const val GBOARD_BRIDGE_EXTRA_VOICE_STATE = "bridge_voice_state"
         private const val GBOARD_BRIDGE_EXTRA_GBOARD_MIC_ENABLED = "bridge_gboard_mic_enabled"
         private const val GBOARD_BRIDGE_EXTRA_TOGGLE_PENDING_INTENT = "bridge_toggle_pending_intent"

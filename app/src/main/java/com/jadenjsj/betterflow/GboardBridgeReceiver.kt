@@ -27,13 +27,41 @@ class GboardBridgeReceiver : BroadcastReceiver() {
             @Suppress("DEPRECATION")
             intent.getParcelableExtra(EXTRA_RESULT_RECEIVER)
         }
-        val senderUid = if (Build.VERSION.SDK_INT >= 34) sentFromUid else -1
-        val senderPackages = context.packageManager.getPackagesForUid(senderUid).orEmpty()
-        if (GBOARD_PACKAGE !in senderPackages) {
-            Log.w(TAG, "Rejected bridge broadcast uid=$senderUid packages=${senderPackages.joinToString()}")
+        val senderProof = if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(EXTRA_SENDER_PROOF, PendingIntent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(EXTRA_SENDER_PROOF)
+        }
+        val proofPackage = senderProof?.creatorPackage
+        val proofUid = senderProof?.creatorUid ?: -1
+        val proofPackages = if (proofUid >= 0) {
+            context.packageManager.getPackagesForUid(proofUid).orEmpty()
+        } else {
+            emptyArray()
+        }
+        val directSenderUid = if (Build.VERSION.SDK_INT >= 34) sentFromUid else -1
+        val directSenderPackages = if (directSenderUid >= 0) {
+            context.packageManager.getPackagesForUid(directSenderUid).orEmpty()
+        } else {
+            emptyArray()
+        }
+        val directIdentityValid = directSenderUid >= 0 && GBOARD_PACKAGE in directSenderPackages
+        val proofIdentityValid = proofPackage == GBOARD_PACKAGE && proofUid >= 0 &&
+            (proofPackages.isEmpty() || GBOARD_PACKAGE in proofPackages)
+        if (!directIdentityValid && !proofIdentityValid) {
+            Log.w(
+                TAG,
+                "Rejected bridge broadcast directUid=$directSenderUid " +
+                    "proofUid=$proofUid proofPackage=$proofPackage",
+            )
             resultReceiver?.send(RESULT_REJECTED, Bundle.EMPTY)
             return
         }
+        Log.i(
+            TAG,
+            "Accepted Gboard bridge directUid=$directSenderUid proofUid=$proofUid proofPackage=$proofPackage",
+        )
 
         when (intent.getStringExtra(EXTRA_COMMAND)) {
             COMMAND_SNAPSHOT -> {
@@ -69,6 +97,7 @@ class GboardBridgeReceiver : BroadcastReceiver() {
         const val COMMAND_GET_TOGGLE_PENDING_INTENT = "toggle_pending_intent"
         const val EXTRA_COMMAND = "bridge_command"
         const val EXTRA_RESULT_RECEIVER = "bridge_result_receiver"
+        const val EXTRA_SENDER_PROOF = "bridge_sender_proof"
         const val EXTRA_VOICE_STATE = "bridge_voice_state"
         const val EXTRA_GBOARD_MIC_ENABLED = "bridge_gboard_mic_enabled"
         const val EXTRA_TOGGLE_PENDING_INTENT = "bridge_toggle_pending_intent"
