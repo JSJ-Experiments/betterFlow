@@ -546,7 +546,7 @@ class BetterFlowXposedModule(
         )
         val intent = Intent(GBOARD_BRIDGE_BROADCAST_ACTION)
             .setClassName(BETTERFLOW_PACKAGE, GBOARD_BRIDGE_RECEIVER)
-            .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+            .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES or Intent.FLAG_RECEIVER_FOREGROUND)
             .putExtra(GBOARD_BRIDGE_EXTRA_COMMAND, command)
             .putExtra(GBOARD_BRIDGE_EXTRA_RESULT_RECEIVER, receiver)
             .putExtra(GBOARD_BRIDGE_EXTRA_SENDER_PROOF, senderProof)
@@ -794,7 +794,7 @@ class BetterFlowXposedModule(
         private val MIC_REACQUIRE_DELAYS_MS = longArrayOf(0L, 60L, 140L, 280L, 520L, 900L)
         private val BRIDGE_STATE_SYNC_DELAYS_MS = longArrayOf(120L, 350L, 900L)
         private const val BRIDGE_REBIND_DELAY_MS = 120L
-        private const val BRIDGE_TOGGLE_TIMEOUT_MS = 1_500L
+        private const val BRIDGE_TOGGLE_TIMEOUT_MS = 3_000L
         private const val SOFT_KEY_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyView"
         private const val SOFT_KEYBOARD_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyboardView"
         private val VOICE_RESOURCE_TOKENS = listOf("voice", "microphone", "dictat", "speech", "mic_")
