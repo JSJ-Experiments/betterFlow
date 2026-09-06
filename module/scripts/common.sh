@@ -2,7 +2,7 @@
 MODID=betterflow
 PKG=com.jadenjsj.betterflow
 SERVICE=com.jadenjsj.betterflow/.OverlayService
-ACTION_SHOW=com.jadenjsj.betterflow.action.SHOW
+ACTION_WAKE=com.jadenjsj.betterflow.action.WAKE
 DATA_DIR=/data/adb/betterflow-data
 REPO=JSJ-Experiments/betterFlow
 LATEST_BASE=https://github.com/$REPO/releases/latest/download
@@ -61,8 +61,8 @@ ensure_permissions() {
 
 start_app() {
   cmd package set-stopped-state "$PKG" false >/dev/null 2>&1 || true
-  am start-foreground-service --user 0 -a "$ACTION_SHOW" -n "$SERVICE" >/dev/null 2>&1 || \
-    am startservice --user 0 -a "$ACTION_SHOW" -n "$SERVICE" >/dev/null 2>&1 || true
+  am start-foreground-service --user 0 -a "$ACTION_WAKE" -n "$SERVICE" >/dev/null 2>&1 || \
+    am startservice --user 0 -a "$ACTION_WAKE" -n "$SERVICE" >/dev/null 2>&1 || true
 }
 
 boost_app() {

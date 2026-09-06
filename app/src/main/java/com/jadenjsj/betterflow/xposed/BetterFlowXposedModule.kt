@@ -1,5 +1,6 @@
 package com.jadenjsj.betterflow.xposed
 
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -328,7 +329,7 @@ class BetterFlowXposedModule(
                     setMicVisual(voiceState)
                     target?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     log("$TAG Gboard mic gesture UP while processing -> cancel")
-                    if (!triggerBetterFlow()) {
+                    if (!triggerBetterFlow(previous)) {
                         voiceState = previous
                         setMicVisual(voiceState)
                     }
@@ -337,7 +338,7 @@ class BetterFlowXposedModule(
                 voiceState = if (previous == VoiceState.IDLE) VoiceState.RECORDING else VoiceState.PROCESSING
                 setMicVisual(voiceState)
                 log("$TAG Gboard mic gesture UP -> betterFlow toggle, optimistic=${voiceState.wireName}")
-                if (!triggerBetterFlow()) {
+                if (!triggerBetterFlow(previous)) {
                     voiceState = previous
                     setMicVisual(voiceState)
                 }
@@ -357,11 +358,16 @@ class BetterFlowXposedModule(
         if (bridgeConnection != null) return
         val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                if (bridgeConnection !== this) return
                 bridgeBinder = binder
                 syncBridgeConfig()
                 if (pendingToggle) {
                     pendingToggle = false
-                    if (!transactToggle()) syncBridgeState()
+                    if (transactToggleFromGboard()) {
+                        scheduleBridgeStateSync(service)
+                    } else {
+                        syncBridgeState()
+                    }
                 } else {
                     syncBridgeState()
                 }
@@ -369,17 +375,17 @@ class BetterFlowXposedModule(
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
-                bridgeBinder = null
+                clearBridgeConnection(service, this)
                 log("$TAG Gboard Binder bridge disconnected: $name")
             }
 
             override fun onBindingDied(name: ComponentName?) {
-                bridgeBinder = null
+                clearBridgeConnection(service, this)
                 log("$TAG Gboard Binder bridge binding died: $name")
             }
 
             override fun onNullBinding(name: ComponentName?) {
-                bridgeBinder = null
+                clearBridgeConnection(service, this)
                 log("$TAG Gboard Binder bridge returned null binding: $name")
             }
         }
@@ -410,6 +416,16 @@ class BetterFlowXposedModule(
         }
     }
 
+    private fun clearBridgeConnection(service: InputMethodService, connection: ServiceConnection) {
+        if (bridgeConnection !== connection) return
+        bridgeConnection = null
+        bridgeBinder = null
+        runCatching { service.unbindService(connection) }
+        Handler(service.mainLooper).postDelayed({
+            if (currentIme?.get() === service && bridgeConnection == null) bindBridge(service)
+        }, BRIDGE_REBIND_DELAY_MS)
+    }
+
     private fun unbindBridge(service: InputMethodService) {
         val connection = bridgeConnection ?: return
         bridgeConnection = null
@@ -418,8 +434,35 @@ class BetterFlowXposedModule(
         runCatching { service.unbindService(connection) }
     }
 
+    private fun transactTogglePendingIntent(): Boolean {
+        val binder = bridgeBinder?.takeIf { it.isBinderAlive } ?: return false
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(GBOARD_BRIDGE_DESCRIPTOR)
+            if (!binder.transact(GBOARD_TRANSACTION_GET_TOGGLE_PENDING_INTENT, data, reply, 0)) return false
+            reply.readException()
+            val pendingIntent = PendingIntent.readPendingIntentOrNullFromParcel(reply) ?: return false
+            pendingIntent.send()
+            true
+        } catch (t: Throwable) {
+            log("$TAG Gboard PendingIntent toggle failed: ${t.message}", t)
+            bridgeBinder = null
+            false
+        } finally {
+            data.recycle()
+            reply.recycle()
+        }
+    }
+
+    private fun transactToggleFromGboard(): Boolean {
+        if (transactTogglePendingIntent()) return true
+        // Compatibility fallback while an older bridge APK is still alive during an update.
+        return transactToggle()
+    }
+
     private fun transactToggle(): Boolean {
-        val binder = bridgeBinder ?: return false
+        val binder = bridgeBinder?.takeIf { it.isBinderAlive } ?: return false
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
@@ -438,7 +481,7 @@ class BetterFlowXposedModule(
     }
 
     private fun syncBridgeState() {
-        val binder = bridgeBinder ?: return
+        val binder = bridgeBinder?.takeIf { it.isBinderAlive } ?: return
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         try {
@@ -456,7 +499,7 @@ class BetterFlowXposedModule(
     }
 
     private fun syncBridgeConfig() {
-        val binder = bridgeBinder ?: return
+        val binder = bridgeBinder?.takeIf { it.isBinderAlive } ?: return
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         try {
@@ -480,26 +523,50 @@ class BetterFlowXposedModule(
         }
     }
 
-    private fun triggerBetterFlow(): Boolean {
+    private fun scheduleBridgeStateSync(service: InputMethodService) {
+        BRIDGE_STATE_SYNC_DELAYS_MS.forEach { delayMs ->
+            Handler(service.mainLooper).postDelayed({ syncBridgeState() }, delayMs)
+        }
+    }
+
+    private fun schedulePendingToggleTimeout(service: InputMethodService, previous: VoiceState) {
+        Handler(service.mainLooper).postDelayed({
+            if (!pendingToggle) return@postDelayed
+            pendingToggle = false
+            voiceState = previous
+            applyVoiceStateVisual(service, voiceState)
+            log("$TAG Gboard Binder toggle timed out; restored pre-tap state=${previous.wireName}")
+            bridgeConnection?.let { clearBridgeConnection(service, it) }
+        }, BRIDGE_TOGGLE_TIMEOUT_MS)
+    }
+
+    private fun triggerBetterFlow(previous: VoiceState): Boolean {
         val service = currentIme?.get() ?: run {
             log("$TAG cannot trigger betterFlow: no live IME service")
             return false
         }
-        if (transactToggle()) {
-            log("$TAG authenticated Gboard Binder toggle accepted")
+        if (bridgeBinder?.isBinderAlive == true && transactToggleFromGboard()) {
+            scheduleBridgeStateSync(service)
+            log("$TAG authenticated Gboard PendingIntent toggle sent")
             return true
         }
+
+        bridgeBinder = null
+        bridgeConnection?.let { clearBridgeConnection(service, it) }
         pendingToggle = true
         bindBridge(service)
-        if (bridgeBinder != null && pendingToggle) {
+        schedulePendingToggleTimeout(service, previous)
+        if (bridgeBinder?.isBinderAlive == true && pendingToggle) {
             pendingToggle = false
-            if (transactToggle()) {
-                log("$TAG authenticated Gboard Binder toggle accepted after rebind")
+            if (transactToggleFromGboard()) {
+                scheduleBridgeStateSync(service)
+                log("$TAG authenticated Gboard PendingIntent toggle sent after rebind")
                 return true
             }
         }
-        // A successful bind request may complete asynchronously and consume pendingToggle.
-        return pendingToggle || bridgeConnection != null
+        // A successful bind request can complete asynchronously. The timeout above
+        // rolls the optimistic visual back if the bridge never actually toggles.
+        return bridgeConnection != null
     }
 
     private fun clearMicStateOverlay(mic: View?) {
@@ -603,8 +670,11 @@ class BetterFlowXposedModule(
             fun after(callback: AfterHookCallback) {
                 val service = callback.thisObject as? InputMethodService ?: return
                 Handler(service.mainLooper).postDelayed({
-                    runCatching { activeModule?.locateGboardMic(service) }
-                        .onFailure { activeModule?.log("$TAG Gboard mic discovery failed: ${it.message}", it) }
+                    runCatching {
+                        activeModule?.bindBridge(service)
+                        activeModule?.locateGboardMic(service)
+                        activeModule?.syncBridgeState()
+                    }.onFailure { activeModule?.log("$TAG Gboard mic discovery failed: ${it.message}", it) }
                 }, 350L)
             }
         }
@@ -631,8 +701,12 @@ class BetterFlowXposedModule(
         private const val GBOARD_TRANSACTION_TOGGLE = IBinder.FIRST_CALL_TRANSACTION
         private const val GBOARD_TRANSACTION_GET_STATE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val GBOARD_TRANSACTION_GET_CONFIG = IBinder.FIRST_CALL_TRANSACTION + 2
+        private const val GBOARD_TRANSACTION_GET_TOGGLE_PENDING_INTENT = IBinder.FIRST_CALL_TRANSACTION + 3
         private const val COMMIT_DEDUPE_TTL_MS = 10_000L
         private val MIC_REACQUIRE_DELAYS_MS = longArrayOf(0L, 60L, 140L, 280L, 520L, 900L)
+        private val BRIDGE_STATE_SYNC_DELAYS_MS = longArrayOf(120L, 350L, 900L)
+        private const val BRIDGE_REBIND_DELAY_MS = 120L
+        private const val BRIDGE_TOGGLE_TIMEOUT_MS = 1_500L
         private const val SOFT_KEY_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyView"
         private const val SOFT_KEYBOARD_CLASS = "com.google.android.libraries.inputmethod.widgets.SoftKeyboardView"
         private val VOICE_RESOURCE_TOKENS = listOf("voice", "microphone", "dictat", "speech", "mic_")

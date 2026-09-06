@@ -43,6 +43,12 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        runCatching {
+            startForegroundService(
+                Intent(this, OverlayService::class.java)
+                    .setAction(OverlayService.ACTION_WAKE),
+            )
+        }
         setContent { MaterialTheme { SettingsScreen() } }
     }
 }

@@ -10,6 +10,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -20,6 +21,7 @@ import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.Toast
@@ -79,14 +81,20 @@ class OverlayService : Service() {
         when (intent?.action) {
             ACTION_HIDE -> hideBubble(persist = true)
             ACTION_SHOW -> showBubble(persist = true)
+            ACTION_WAKE -> restoreBubbleVisibility()
             ACTION_TOGGLE -> toggleRecording()
             ACTION_STOP -> stopSelf()
-            else -> if (Prefs.bubbleVisible(this)) showBubble(persist = false) else hideBubble(persist = false)
+            else -> restoreBubbleVisibility()
         }
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        bubble?.post { clampCurrentBubblePosition(persist = true) }
+    }
 
     override fun onDestroy() {
         operationGeneration++
@@ -105,9 +113,18 @@ class OverlayService : Service() {
         super.onDestroy()
     }
 
+    private fun restoreBubbleVisibility() {
+        if (Prefs.bubbleVisible(this)) {
+            showBubble(persist = false)
+        } else {
+            hideBubble(persist = false)
+        }
+    }
+
     private fun showBubble(persist: Boolean = true) {
         if (persist) Prefs.setBubbleVisible(this, true)
         if (bubble != null) {
+            clampCurrentBubblePosition(persist = true)
             updateForeground(state)
             return
         }
@@ -123,7 +140,6 @@ class OverlayService : Service() {
             size,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT,
         ).apply {
@@ -131,6 +147,7 @@ class OverlayService : Service() {
             x = savedX
             y = savedY
         }
+        clampBubblePosition(lp, size, persist = true)
         params = lp
         bubble = image
         updateBubbleVisual(BubbleState.IDLE)
@@ -166,11 +183,12 @@ class OverlayService : Service() {
                     }
                     p.x = downX + dx
                     p.y = downY + dy
+                    clampBubblePosition(p, size, persist = false)
                     runCatching { windowManager.updateViewLayout(image, p) }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    Prefs.setBubblePosition(this, p.x, p.y)
+                    clampBubblePosition(p, size, persist = true)
                     image.scaleX = 1f
                     image.scaleY = 1f
                     if (!dragged) toggleRecording() else updateBubbleVisual(state)
@@ -195,6 +213,37 @@ class OverlayService : Service() {
             Toast.makeText(this, "betterFlow cannot draw the bubble: ${t.message}", Toast.LENGTH_LONG).show()
         }
         updateForeground(state)
+    }
+
+    private fun clampCurrentBubblePosition(persist: Boolean) {
+        val image = bubble ?: return
+        val p = params ?: return
+        val size = p.width.takeIf { it > 0 } ?: dp(58)
+        if (clampBubblePosition(p, size, persist)) {
+            runCatching { windowManager.updateViewLayout(image, p) }
+        }
+    }
+
+    private fun clampBubblePosition(
+        p: WindowManager.LayoutParams,
+        size: Int,
+        persist: Boolean,
+    ): Boolean {
+        val metrics = windowManager.currentWindowMetrics
+        val insets = metrics.windowInsets.getInsetsIgnoringVisibility(
+            WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(),
+        )
+        val usableWidth = (metrics.bounds.width() - insets.left - insets.right).coerceAtLeast(size)
+        val usableHeight = (metrics.bounds.height() - insets.top - insets.bottom).coerceAtLeast(size)
+        val nextX = p.x.coerceIn(0, (usableWidth - size).coerceAtLeast(0))
+        val nextY = p.y.coerceIn(0, (usableHeight - size).coerceAtLeast(0))
+        val changed = p.x != nextX || p.y != nextY
+        p.x = nextX
+        p.y = nextY
+        if (persist && (changed || Prefs.bubblePosition(this) != (nextX to nextY))) {
+            Prefs.setBubblePosition(this, nextX, nextY)
+        }
+        return changed
     }
 
     private fun hideBubble(persist: Boolean = true) {
@@ -567,6 +616,7 @@ class OverlayService : Service() {
         const val ACTION_SHOW = "com.jadenjsj.betterflow.action.SHOW"
         const val ACTION_HIDE = "com.jadenjsj.betterflow.action.HIDE"
         const val ACTION_TOGGLE = "com.jadenjsj.betterflow.action.TOGGLE"
+        const val ACTION_WAKE = "com.jadenjsj.betterflow.action.WAKE"
         const val ACTION_STOP = "com.jadenjsj.betterflow.action.STOP"
         private const val CHANNEL_ID = "betterflow-overlay"
         private const val NOTIFICATION_ID = 1206
