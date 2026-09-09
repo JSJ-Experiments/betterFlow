@@ -101,7 +101,7 @@ echo "$VERSION_NAME" > "$DATA_DIR/current_version_name"
 date +%s > "$DATA_DIR/last_update_epoch" 2>/dev/null || true
 ensure_permissions
 am force-stop "$PKG" >/dev/null 2>&1 || true
-start_app
-sleep 1
-boost_app
+unstop_app
+start_bubble_if_enabled
+stop_legacy_watchdog
 say "betterFlow: hot update applied — $VERSION_NAME ($VERSION_CODE), no reboot requested"

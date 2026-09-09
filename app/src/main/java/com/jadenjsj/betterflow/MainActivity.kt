@@ -11,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -47,17 +48,15 @@ import kotlin.math.roundToInt
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        runCatching {
-            startForegroundService(
-                Intent(this, OverlayService::class.java)
-                    .setAction(OverlayService.ACTION_WAKE),
-            )
+        lifecycleScope.launch {
+            RootShell.setBubbleBootEnabled(Prefs.bubbleVisible(this@MainActivity))
         }
         setContent { MaterialTheme { SettingsScreen() } }
     }
 }
 
 private fun refreshOverlayConfig(context: Context) {
+    if (!Prefs.bubbleVisible(context)) return
     runCatching {
         context.startForegroundService(
             Intent(context, OverlayService::class.java)
@@ -231,9 +230,13 @@ private fun SettingsScreen() {
                             } else {
                                 bubbleEnabled = enabled
                                 Prefs.setBubbleVisible(context, enabled)
+                                coroutine.launch { RootShell.setBubbleBootEnabled(enabled) }
                                 val serviceIntent = Intent(context, OverlayService::class.java)
-                                    .setAction(if (enabled) OverlayService.ACTION_SHOW else OverlayService.ACTION_HIDE)
-                                context.startForegroundService(serviceIntent)
+                                if (enabled) {
+                                    context.startForegroundService(serviceIntent.setAction(OverlayService.ACTION_SHOW))
+                                } else {
+                                    context.stopService(serviceIntent)
+                                }
                                 status = if (enabled) "Floating microphone enabled" else "Floating microphone disabled"
                             }
                         },

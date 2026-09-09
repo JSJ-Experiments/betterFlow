@@ -77,19 +77,50 @@ class OverlayService : Service() {
         ensureNotificationChannel()
         VoiceRuntimeState.wireName = BubbleState.IDLE.wireName
         updateForeground(BubbleState.IDLE)
+        RootShell.retireLegacyWatchdog()
         broadcastVoiceState(BubbleState.IDLE)
         if (Prefs.bubbleVisible(this)) showBubble(persist = false)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_HIDE -> hideBubble(persist = true)
-            ACTION_SHOW -> showBubble(persist = true)
+        val remainRunning = when (intent?.action) {
+            ACTION_HIDE -> {
+                hideBubble(persist = true, updateNotification = false)
+                RootShell.setBubbleBootEnabledAsync(false)
+                false
+            }
+            ACTION_SHOW -> {
+                showBubble(persist = true)
+                if (bubble != null) RootShell.setBubbleBootEnabledAsync(true)
+                bubble != null
+            }
             ACTION_WAKE -> restoreBubbleVisibility()
-            ACTION_REFRESH_CONFIG -> refreshRuntimeConfig()
-            ACTION_TOGGLE -> toggleRecording()
-            ACTION_STOP -> stopSelf()
+            ACTION_REFRESH_CONFIG -> {
+                if (Prefs.bubbleVisible(this)) {
+                    refreshRuntimeConfig()
+                    true
+                } else {
+                    false
+                }
+            }
+            ACTION_TOGGLE -> {
+                if (Prefs.bubbleVisible(this)) {
+                    toggleRecording()
+                    true
+                } else {
+                    false
+                }
+            }
+            ACTION_STOP -> {
+                hideBubble(persist = true, updateNotification = false)
+                RootShell.setBubbleBootEnabledAsync(false)
+                false
+            }
             else -> restoreBubbleVisibility()
+        }
+        if (!remainRunning) {
+            stopSelf(startId)
+            return START_NOT_STICKY
         }
         return START_STICKY
     }
@@ -114,16 +145,18 @@ class OverlayService : Service() {
         state = BubbleState.IDLE
         VoiceRuntimeState.wireName = BubbleState.IDLE.wireName
         broadcastVoiceState(BubbleState.IDLE)
-        hideBubble(persist = false)
+        hideBubble(persist = false, updateNotification = false)
         scope.cancel()
         super.onDestroy()
     }
 
-    private fun restoreBubbleVisibility() {
-        if (Prefs.bubbleVisible(this)) {
+    private fun restoreBubbleVisibility(): Boolean {
+        return if (Prefs.bubbleVisible(this)) {
             showBubble(persist = false)
+            bubble != null
         } else {
-            hideBubble(persist = false)
+            hideBubble(persist = false, updateNotification = false)
+            false
         }
     }
 
@@ -386,13 +419,13 @@ class OverlayService : Service() {
         runCatching { windowManager.updateViewLayout(container, p) }
     }
 
-    private fun hideBubble(persist: Boolean = true) {
+    private fun hideBubble(persist: Boolean = true, updateNotification: Boolean = true) {
         if (persist) Prefs.setBubbleVisible(this, false)
         bubble?.let { runCatching { windowManager.removeView(it) } }
         bubble = null
         bubbleImage = null
         params = null
-        updateForeground(state)
+        if (updateNotification) updateForeground(state)
     }
 
     private fun toggleRecording() {
@@ -661,6 +694,7 @@ class OverlayService : Service() {
         currentPcm = ByteArray(0)
         Log.i(TAG, "processing cancelled by user")
         updateState(BubbleState.IDLE)
+        if (!Prefs.bubbleVisible(this)) stopSelf()
     }
 
     private fun cancelStreamOnly(reason: String) {
@@ -682,6 +716,7 @@ class OverlayService : Service() {
         streamingFailure = null
         currentPcm = ByteArray(0)
         updateState(BubbleState.IDLE)
+        if (!Prefs.bubbleVisible(this)) stopSelf()
     }
 
     private fun updateState(next: BubbleState) {

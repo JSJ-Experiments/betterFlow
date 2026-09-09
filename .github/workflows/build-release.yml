@@ -45,6 +45,9 @@ jobs:
           npm ci --ignore-scripts
           npm run build
 
+      - name: Check event-driven power behavior
+        run: ./tools/check-power-behavior.sh
+
       - name: Prepare signing key
         if: github.event_name != 'pull_request'
         env:
