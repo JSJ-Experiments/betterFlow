@@ -80,6 +80,8 @@ private fun SettingsScreen() {
     var bubbleOpacityPercent by remember { mutableStateOf(Prefs.bubbleOpacityPercent(context)) }
     var notificationPriority by remember { mutableStateOf(Prefs.notificationPriority(context)) }
     var legacyTranscription by remember { mutableStateOf(Prefs.legacyTranscription(context)) }
+    var preservePreTapAudio by remember { mutableStateOf(Prefs.preservePreTapAudio(context)) }
+    var audioDrainTimeoutMs by remember { mutableStateOf(Prefs.audioDrainTimeoutMs(context)) }
     var streamingKeyConfigured by remember { mutableStateOf(Prefs.streamingApiKey(context) != null || BuildConfig.WISPR_BASETEN_API_KEY.isNotBlank()) }
     var streamingApiKey by remember { mutableStateOf("") }
     var email by remember { mutableStateOf(session?.email.orEmpty()) }
@@ -121,6 +123,43 @@ private fun SettingsScreen() {
                         },
                     )
                 }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Preserve words before stop tap")
+                        Text(
+                            "Drain Android's pending microphone buffer, but discard every sample captured after you tap stop.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(
+                        checked = preservePreTapAudio,
+                        onCheckedChange = { enabled ->
+                            preservePreTapAudio = enabled
+                            Prefs.setPreservePreTapAudio(context, enabled)
+                            status = if (enabled) "Pre-tap audio preservation enabled" else "Microphone will stop immediately"
+                        },
+                    )
+                }
+
+                Text("Pre-tap buffer drain timeout: $audioDrainTimeoutMs ms")
+                Slider(
+                    value = audioDrainTimeoutMs.toFloat(),
+                    onValueChange = { audioDrainTimeoutMs = (it / 50f).roundToInt() * 50 },
+                    onValueChangeFinished = {
+                        Prefs.setAudioDrainTimeoutMs(context, audioDrainTimeoutMs)
+                        status = "Pre-tap buffer drain timeout set to $audioDrainTimeoutMs ms"
+                    },
+                    valueRange = Prefs.MIN_AUDIO_DRAIN_TIMEOUT_MS.toFloat()..Prefs.MAX_AUDIO_DRAIN_TIMEOUT_MS.toFloat(),
+                    enabled = preservePreTapAudio,
+                )
+                Text(
+                    "This is a maximum drain wait, not extra recorded time. The transcript cutoff remains the stop-tap timestamp.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,

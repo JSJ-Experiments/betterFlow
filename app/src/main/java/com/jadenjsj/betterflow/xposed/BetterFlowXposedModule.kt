@@ -28,6 +28,7 @@ import com.jadenjsj.betterflow.AudioRecorderController
 import com.jadenjsj.betterflow.AuthStore
 import com.jadenjsj.betterflow.BuildConfig
 import com.jadenjsj.betterflow.InputInjector
+import com.jadenjsj.betterflow.Prefs
 import com.jadenjsj.betterflow.WisprClient
 import com.jadenjsj.betterflow.WisprSession
 import com.jadenjsj.betterflow.WisprSessionStore
@@ -382,6 +383,8 @@ class BetterFlowXposedModule(
         val wispr: WisprClient,
         val streaming: WisprStreamingClient,
         val legacyOnly: Boolean,
+        val preservePreTapAudio: Boolean,
+        val audioDrainTimeoutMs: Int,
     )
 
     private class HookSessionStore(private val prefs: SharedPreferences) : WisprSessionStore {
@@ -439,6 +442,11 @@ class BetterFlowXposedModule(
             wispr = wispr,
             streaming = WisprStreamingClient(wispr) { apiKey },
             legacyOnly = prefs.getBoolean(REMOTE_KEY_LEGACY_TRANSCRIPTION, false),
+            preservePreTapAudio = prefs.getBoolean(REMOTE_KEY_PRESERVE_PRE_TAP_AUDIO, true),
+            audioDrainTimeoutMs = prefs.getInt(
+                REMOTE_KEY_AUDIO_DRAIN_TIMEOUT_MS,
+                Prefs.DEFAULT_AUDIO_DRAIN_TIMEOUT_MS,
+            ).coerceIn(Prefs.MIN_AUDIO_DRAIN_TIMEOUT_MS, Prefs.MAX_AUDIO_DRAIN_TIMEOUT_MS),
         )
     }
 
@@ -523,6 +531,7 @@ class BetterFlowXposedModule(
 
     private fun stopHookRecordingAndTranscribe(service: InputMethodService) {
         if (!hookOwnsVoiceSession || voiceState != VoiceState.RECORDING) return
+        val cutoffNanos = System.nanoTime()
         val generation = hookOperationGeneration
         val clients = hookClients ?: run {
             cancelHookVoice("missing hook clients")
@@ -530,16 +539,17 @@ class BetterFlowXposedModule(
         }
         voiceState = VoiceState.PROCESSING
         applyVoiceStateVisual(service, voiceState)
-        val pcm = hookRecorder.stopAndGetPcm()
-        if (pcm.isEmpty()) {
-            finishHookVoice(service, generation, null, IllegalStateException("no microphone audio captured"))
-            return
-        }
 
         Thread({
             var text: String? = null
             var error: Throwable? = null
             try {
+                val pcm = hookRecorder.stopAndGetPcm(
+                    preservePreTapTail = clients.preservePreTapAudio,
+                    drainTimeoutMs = clients.audioDrainTimeoutMs,
+                    cutoffNanos = cutoffNanos,
+                )
+                check(pcm.isNotEmpty()) { "no microphone audio captured" }
                 text = if (clients.legacyOnly) {
                     runBlocking { clients.wispr.transcribeLegacyPcm(pcm) }.trim()
                 } else {
@@ -1136,6 +1146,8 @@ class BetterFlowXposedModule(
         private const val REMOTE_KEY_STREAMING_API_KEY = "streaming_api_key"
         private const val REMOTE_KEY_GBOARD_MIC_ENABLED = "gboard_mic_enabled"
         private const val REMOTE_KEY_LEGACY_TRANSCRIPTION = "legacy_transcription"
+        private const val REMOTE_KEY_PRESERVE_PRE_TAP_AUDIO = "preserve_pre_tap_audio"
+        private const val REMOTE_KEY_AUDIO_DRAIN_TIMEOUT_MS = "audio_drain_timeout_ms"
         private const val HOOK_STREAM_OPEN_TIMEOUT_MS = 20_000L
         private const val HOOK_STREAM_RESULT_TIMEOUT_MS = 30_000L
         private const val COMMIT_DEDUPE_TTL_MS = 10_000L

@@ -49,6 +49,8 @@ object Prefs {
     private const val KEY_VOICE_TRIGGER_V2_MIGRATED = "voice_trigger_v2_migrated"
     private const val KEY_LEGACY_TRANSCRIPTION = "legacy_transcription"
     private const val KEY_STREAMING_API_KEY = "streaming_api_key"
+    private const val KEY_PRESERVE_PRE_TAP_AUDIO = "preserve_pre_tap_audio"
+    private const val KEY_AUDIO_DRAIN_TIMEOUT_MS = "audio_drain_timeout_ms"
 
     private fun prefs(context: Context) = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
@@ -159,12 +161,34 @@ object Prefs {
         XposedRemoteAuthSync.syncFromLocal()
     }
 
+    fun preservePreTapAudio(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_PRESERVE_PRE_TAP_AUDIO, true)
+
+    fun setPreservePreTapAudio(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_PRESERVE_PRE_TAP_AUDIO, enabled).apply()
+        XposedRemoteAuthSync.syncFromLocal()
+    }
+
+    fun audioDrainTimeoutMs(context: Context): Int =
+        prefs(context).getInt(KEY_AUDIO_DRAIN_TIMEOUT_MS, DEFAULT_AUDIO_DRAIN_TIMEOUT_MS)
+            .coerceIn(MIN_AUDIO_DRAIN_TIMEOUT_MS, MAX_AUDIO_DRAIN_TIMEOUT_MS)
+
+    fun setAudioDrainTimeoutMs(context: Context, timeoutMs: Int) {
+        prefs(context).edit()
+            .putInt(KEY_AUDIO_DRAIN_TIMEOUT_MS, timeoutMs.coerceIn(MIN_AUDIO_DRAIN_TIMEOUT_MS, MAX_AUDIO_DRAIN_TIMEOUT_MS))
+            .apply()
+        XposedRemoteAuthSync.syncFromLocal()
+    }
+
     const val MIN_BUBBLE_SIZE_DP = 36
     const val MAX_BUBBLE_SIZE_DP = 88
     const val DEFAULT_BUBBLE_SIZE_DP = 58
     const val MIN_BUBBLE_OPACITY_PERCENT = 20
     const val MAX_BUBBLE_OPACITY_PERCENT = 100
     const val DEFAULT_BUBBLE_OPACITY_PERCENT = 100
+    const val MIN_AUDIO_DRAIN_TIMEOUT_MS = 100
+    const val MAX_AUDIO_DRAIN_TIMEOUT_MS = 1000
+    const val DEFAULT_AUDIO_DRAIN_TIMEOUT_MS = 400
 }
 
 object VoiceRuntimeState {

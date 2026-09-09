@@ -58,6 +58,7 @@ class OverlayService : Service() {
     private var legacyForCurrentRecording = false
     private var currentPcm = ByteArray(0)
     private var processingJob: Job? = null
+    private var captureFinalizeJob: Job? = null
     private var streamWorker: Job? = null
     @Volatile private var activeStream: WisprStreamingClient.Session? = null
     @Volatile private var streamingFailure: Throwable? = null
@@ -106,6 +107,7 @@ class OverlayService : Service() {
         streamStopRequested = true
         activeStream?.cancel("betterFlow service destroyed")
         streamWorker?.cancel()
+        captureFinalizeJob?.cancel()
         processingJob?.cancel()
         wispr.cancelActiveTranscription()
         if (recorder.isRecording()) runCatching { recorder.stopAndDiscard() }
@@ -493,7 +495,11 @@ class OverlayService : Service() {
                 streamQueueEnabled.set(false)
                 Log.w(TAG, "Wispr streaming failed: ${t.message}", t)
                 withContext(Dispatchers.Main.immediate) {
-                    if (generation == operationGeneration && state == BubbleState.PROCESSING) {
+                    if (
+                        generation == operationGeneration &&
+                        state == BubbleState.PROCESSING &&
+                        streamCaptureFinalized
+                    ) {
                         startLegacyFallback(currentPcm, generation, "streaming failed: ${t.message}")
                     }
                 }
@@ -522,30 +528,45 @@ class OverlayService : Service() {
 
     private fun stopRecording() {
         if (state != BubbleState.RECORDING) return
+        val cutoffNanos = System.nanoTime()
+        val generation = operationGeneration
+        val preservePreTapAudio = Prefs.preservePreTapAudio(this)
+        val drainTimeoutMs = Prefs.audioDrainTimeoutMs(this)
         updateState(BubbleState.PROCESSING)
         streamQueueEnabled.set(false)
         streamStopRequested = true
-        currentPcm = recorder.stopAndGetPcm()
-        streamCaptureFinalized = true
+        captureFinalizeJob?.cancel()
+        captureFinalizeJob = scope.launch(Dispatchers.IO) {
+            val captured = recorder.stopAndGetPcm(
+                preservePreTapTail = preservePreTapAudio,
+                drainTimeoutMs = drainTimeoutMs,
+                cutoffNanos = cutoffNanos,
+            )
+            withContext(Dispatchers.Main.immediate) {
+                if (generation != operationGeneration || state != BubbleState.PROCESSING) return@withContext
+                currentPcm = captured
+                streamCaptureFinalized = true
+                captureFinalizeJob = null
 
-        if (currentPcm.isEmpty()) {
-            cancelStreamOnly("empty recording")
-            updateState(BubbleState.IDLE)
-            return
-        }
+                if (currentPcm.isEmpty()) {
+                    cancelStreamOnly("empty recording")
+                    updateState(BubbleState.IDLE)
+                    return@withContext
+                }
 
-        if (legacyForCurrentRecording) {
-            startLegacyFallback(currentPcm, operationGeneration, "legacy mode")
-            return
-        }
+                if (legacyForCurrentRecording) {
+                    startLegacyFallback(currentPcm, generation, "legacy mode")
+                    return@withContext
+                }
 
-        streamingFailure?.let { failure ->
-            cancelStreamOnly("stream already failed")
-            startLegacyFallback(currentPcm, operationGeneration, "streaming failed: ${failure.message}")
-            return
+                streamingFailure?.let { failure ->
+                    cancelStreamOnly("stream already failed")
+                    startLegacyFallback(currentPcm, generation, "streaming failed: ${failure.message}")
+                }
+                // Otherwise the stream worker sends the retained PCM suffix and
+                // commits after capture through the stop-tap timestamp is complete.
+            }
         }
-        // The stream worker drains all queued PCM, sends the separate commit frame,
-        // waits for the final response, then calls handleStreamingResult().
     }
 
     private fun handleStreamingResult(result: WisprStreamingClient.Result, generation: Long) {
@@ -629,6 +650,8 @@ class OverlayService : Service() {
         activeStream = null
         streamWorker?.cancel()
         streamWorker = null
+        captureFinalizeJob?.cancel()
+        captureFinalizeJob = null
         processingJob?.cancel()
         processingJob = null
         val cancelledHttp = wispr.cancelActiveTranscription()
@@ -654,6 +677,7 @@ class OverlayService : Service() {
     private fun finishOperation(generation: Long) {
         if (generation != operationGeneration) return
         cancelStreamOnly("operation complete")
+        captureFinalizeJob = null
         processingJob = null
         streamingFailure = null
         currentPcm = ByteArray(0)
