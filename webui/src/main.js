@@ -21,9 +21,9 @@ async function refresh() {
   try {
     const s = parseKv(await run(ctl('status')));
     $('version').textContent = `${s.version || 'unknown'} (${s.versionCode || '?'})`;
-    $('watchdog').textContent = s.watchdogPid === 'stopped' ? 'stopped' : `pid ${s.watchdogPid}`;
+    $('background').textContent = 'off';
     $('app').textContent = s.appPid === 'stopped' ? 'stopped' : `pid ${s.appPid}`;
-    $('auto').textContent = s.autoUpdate === '1' ? 'on' : 'off';
+    $('bubble').textContent = s.bubble || 'unknown';
     $('dot').className = `dot ${s.appPid && s.appPid !== 'stopped' ? 'ok' : 'bad'}`;
   } catch (error) {
     $('dot').className = 'dot bad';
@@ -52,8 +52,6 @@ for (const [id, verb] of [
   ['settings', 'settings'],
   ['start', 'start'],
   ['stop', 'stop'],
-  ['autoOn', 'auto-on'],
-  ['autoOff', 'auto-off'],
 ]) {
   $(id).onclick = () => run(ctl(verb)).then(refresh).catch((error) => toast(String(error)));
 }
