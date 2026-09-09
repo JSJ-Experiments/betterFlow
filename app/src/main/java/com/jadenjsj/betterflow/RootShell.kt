@@ -2,8 +2,16 @@ package com.jadenjsj.betterflow
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 object RootShell {
+    private val bubbleBootStateWorker = BubbleBootStateWorker { enabled ->
+        runFixed(bubbleBootCommand(enabled)).first == 0
+    }
+
     suspend fun hasRoot(): Boolean = withContext(Dispatchers.IO) {
         val result = runFixed("id -u")
         result.first == 0 && result.second.trim() == "0"
@@ -14,13 +22,11 @@ object RootShell {
     }
 
     suspend fun setBubbleBootEnabled(enabled: Boolean): Boolean = withContext(Dispatchers.IO) {
-        runFixed(bubbleBootCommand(enabled)).first == 0
+        bubbleBootStateWorker.set(enabled)
     }
 
     fun setBubbleBootEnabledAsync(enabled: Boolean) {
-        Thread({
-            runFixed(bubbleBootCommand(enabled))
-        }, "betterflow-bubble-boot-state").start()
+        bubbleBootStateWorker.setAsync(enabled)
     }
 
     fun retireLegacyWatchdog() {
@@ -49,6 +55,33 @@ object RootShell {
             process.waitFor() to output
         } catch (t: Throwable) {
             -1 to (t.message ?: "root command failed")
+        }
+    }
+}
+
+internal class BubbleBootStateWorker(
+    private val updateState: (Boolean) -> Boolean,
+) {
+    private val executor: ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "betterflow-bubble-boot-state").apply { isDaemon = true }
+    }
+
+    fun set(enabled: Boolean): Boolean = try {
+        executor.submit<Boolean> { updateState(enabled) }.get()
+    } catch (_: ExecutionException) {
+        false
+    } catch (_: RejectedExecutionException) {
+        false
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        false
+    }
+
+    fun setAsync(enabled: Boolean) {
+        try {
+            executor.execute { updateState(enabled) }
+        } catch (_: RejectedExecutionException) {
+            // The process is already shutting down; there is no state to preserve.
         }
     }
 }

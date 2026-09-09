@@ -7,7 +7,14 @@ mkdir -p "$DATA_DIR" "$DATA_DIR/backups" "$DATA_DIR/tmp"
 setprop ctl.stop betterflow_watchdog 2>/dev/null || true
 if [ -f "$DATA_DIR/watchdog.pid" ]; then
   old_watchdog=$(cat "$DATA_DIR/watchdog.pid" 2>/dev/null || true)
-  case "$old_watchdog" in ''|*[!0-9]*) ;; *) kill "$old_watchdog" 2>/dev/null || true;; esac
+  case "$old_watchdog" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ -r "/proc/$old_watchdog/cmdline" ] && tr '\000' ' ' < "/proc/$old_watchdog/cmdline" | grep -q '/betterflow/scripts/watchdog.sh'; then
+        [ "$old_watchdog" = "$$" ] || kill "$old_watchdog" 2>/dev/null || true
+      fi
+      ;;
+  esac
   rm -f "$DATA_DIR/watchdog.pid"
 fi
 VERSION=$(grep '^version=' "$MODPATH/module.prop" | cut -d= -f2-)
