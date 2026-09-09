@@ -50,6 +50,18 @@ bb unzip -oq "$ZIP" -d "$TMP/unpack" || { say "betterFlow: unzip failed"; exit 1
 APK="$TMP/unpack/app/betterflow.apk"
 [ -s "$APK" ] || { say "betterFlow: release has no APK"; exit 1; }
 
+# Refresh the updater itself before installing the APK. This deliberately
+# happens after SHA-256 verification and lets a corrected installer recover on
+# the next Action run even if this APK installation fails.
+if [ -d "$TMP/unpack/module-runtime/scripts" ]; then
+  for script in common.sh hot-update.sh; do
+    [ -s "$TMP/unpack/module-runtime/scripts/$script" ] || continue
+    cp -f "$TMP/unpack/module-runtime/scripts/$script" "$MODDIR/scripts/$script.new" || continue
+    chmod 0755 "$MODDIR/scripts/$script.new"
+    mv -f "$MODDIR/scripts/$script.new" "$MODDIR/scripts/$script"
+  done
+fi
+
 OLD_APK="$DATA_DIR/backups/betterflow-prev.apk"
 if [ -s "$DATA_DIR/current.apk" ]; then cp -f "$DATA_DIR/current.apk" "$OLD_APK"; fi
 cp -f "$APK" "$DATA_DIR/current.apk.new"
@@ -63,9 +75,9 @@ if ! install_apk "$DATA_DIR/current.apk.new"; then
 fi
 mv -f "$DATA_DIR/current.apk.new" "$DATA_DIR/current.apk"
 
-# Script payloads are intentionally replaced only after the APK has installed.
+# Refresh the remaining runtime scripts after the APK has installed.
 if [ -d "$TMP/unpack/module-runtime/scripts" ]; then
-  for script in common.sh watchdog.sh status.sh control.sh; do
+  for script in watchdog.sh status.sh control.sh; do
     [ -s "$TMP/unpack/module-runtime/scripts/$script" ] || continue
     cp -f "$TMP/unpack/module-runtime/scripts/$script" "$MODDIR/scripts/$script.new" || continue
     chmod 0755 "$MODDIR/scripts/$script.new"

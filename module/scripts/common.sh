@@ -39,13 +39,20 @@ install_apk() {
   src="$1"
   [ -s "$src" ] || return 1
   stage="/data/local/tmp/betterflow-install-$$.apk"
+  error_log="$DATA_DIR/install-error.log"
   rm -f "$stage"
   cp -f "$src" "$stage" || return 1
   chmod 0644 "$stage" 2>/dev/null || true
-  if pm install -r "$stage" >/dev/null 2>&1; then
+  restorecon "$stage" >/dev/null 2>&1 || true
+  output=$(pm install --user 0 -r "$stage" 2>&1)
+  result=$?
+  if [ "$result" -eq 0 ]; then
     rm -f "$stage"
+    rm -f "$error_log"
     return 0
   fi
+  printf '%s\n' "$output" > "$error_log"
+  printf '%s\n' "$output" >&2
   rm -f "$stage"
   return 1
 }

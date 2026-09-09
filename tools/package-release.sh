@@ -16,7 +16,7 @@ cp -a webui/dist/. "$OUT/module/webroot/"
 cp "$APK" "$OUT/module/payload/betterflow.apk"
 cp "$APK" "$OUT/runtime/app/betterflow.apk"
 
-for script in common.sh watchdog.sh status.sh control.sh; do
+for script in common.sh hot-update.sh watchdog.sh status.sh control.sh; do
   cp "module/scripts/$script" "$OUT/runtime/module-runtime/scripts/$script"
 done
 cp -a webui/dist/. "$OUT/runtime/module-runtime/webroot/"
