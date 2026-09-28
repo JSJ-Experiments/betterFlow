@@ -30,7 +30,7 @@ object XposedRemoteAuthSync {
             XposedServiceHelper.registerListener(object : XposedServiceHelper.OnServiceListener {
                 override fun onServiceBind(bound: XposedService) {
                     service = bound
-                    Log.i(TAG, "LSPosed companion service connected: API ${bound.getAPIVersion()}")
+                    Log.i(TAG, "LSPosed companion service connected: API ${bound.apiVersion}")
                     syncFromLocal()
                 }
 

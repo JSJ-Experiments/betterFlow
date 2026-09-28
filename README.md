@@ -18,7 +18,7 @@ Root-first Android voice typing that stays available, transcribes through Wispr 
 
 1. Install `betterflow-module.zip` from the latest GitHub release in KernelSU.
 2. Open betterFlow once, grant microphone/notification permission, and sign in to Wispr or import a Wispr session JSON.
-3. For direct insertion, enable betterFlow in LSPosed and scope it to your current keyboard. Gboard and AOSP LatinIME are predeclared.
+3. Use an LSPosed build supporting Xposed API 101, then enable betterFlow and scope it to your current keyboard. Gboard and AOSP LatinIME are predeclared. After updating the APK, restart the keyboard process so LSPosed loads the new hook code.
 4. Choose **Auto** in betterFlow. If the LSPosed bridge is unavailable, it falls back to root paste.
 
 KernelSU's **Action** button checks for and applies the newest release without rebooting. Updates are manual, so betterFlow performs no periodic network or process polling.

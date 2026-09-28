@@ -69,6 +69,7 @@ dependencies {
     implementation(libs.coroutines.android)
     implementation(libs.okhttp)
     compileOnly(libs.libxposed.api)
+    implementation("io.github.libxposed:service:101.0.0")
     implementation("io.grpc:grpc-okhttp:1.84.0")
     implementation("io.grpc:grpc-protobuf-lite:1.84.0")
     implementation("io.grpc:grpc-stub:1.84.0")
