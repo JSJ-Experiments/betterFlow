@@ -31,7 +31,8 @@ jobs:
           java-version: '21'
           cache: gradle
 
-      - uses: android-actions/setup-android@v3
+      # v3 requests the removed Android SDK "tools" package by default.
+      - uses: android-actions/setup-android@v4
 
       - uses: actions/setup-node@v4
         with:
