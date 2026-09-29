@@ -101,6 +101,16 @@ echo "$VERSION_NAME" > "$DATA_DIR/current_version_name"
 date +%s > "$DATA_DIR/last_update_epoch" 2>/dev/null || true
 ensure_permissions
 am force-stop "$PKG" >/dev/null 2>&1 || true
+# The IME runs the LSPosed hook in its own process. An APK update does not
+# replace code already loaded there, so restart only the supported active IME.
+ACTIVE_IME=$(settings get secure default_input_method 2>/dev/null || true)
+ACTIVE_IME_PKG=${ACTIVE_IME%%/*}
+case "$ACTIVE_IME_PKG" in
+  com.google.android.inputmethod.latin|com.android.inputmethod.latin)
+    am force-stop "$ACTIVE_IME_PKG" >/dev/null 2>&1 || true
+    say "betterFlow: restarted $ACTIVE_IME_PKG to load the updated hook"
+    ;;
+esac
 unstop_app
 start_bubble_if_enabled
 stop_legacy_watchdog

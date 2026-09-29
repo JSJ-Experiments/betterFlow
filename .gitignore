@@ -13,6 +13,7 @@ _reference/
 *.jks
 *.keystore
 *.apk
+*.apkm
 *.zip
 .DS_Store
 .device-test/

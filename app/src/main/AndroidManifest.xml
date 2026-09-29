@@ -35,10 +35,13 @@
             </intent-filter>
         </activity>
 
-        <provider
+        <receiver
             android:name=".HistoryBridge"
-            android:authorities="${applicationId}.history"
-            android:exported="true" />
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.jadenjsj.betterflow.action.HISTORY_COMMAND" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".OverlayService"

@@ -1,26 +1,50 @@
 package com.jadenjsj.betterflow
 
-import android.content.ContentProvider
-import android.content.ContentValues
+import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
-import android.database.Cursor
-import android.net.Uri
+import android.content.Intent
 import android.os.Bundle
+import android.os.ResultReceiver
 import java.security.SecureRandom
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
-/** Gboard's hook runs under the keyboard UID, so it submits captures to our private store here. */
-class HistoryBridge : ContentProvider() {
-    override fun onCreate(): Boolean = true
-    override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? = null
-    override fun getType(uri: Uri): String? = null
-    override fun insert(uri: Uri, values: ContentValues?): Uri? = null
-    override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = 0
-    override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = 0
+/** Explicit broadcasts work from Gboard even when Android hides our package's provider. */
+class HistoryBridge : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != ACTION_COMMAND) return
+        val reply = intent.getParcelableExtra(EXTRA_REPLY, ResultReceiver::class.java) ?: return
+        val data = intent.getBundleExtra(EXTRA_DATA) ?: Bundle.EMPTY
+        if (data.getString("token") != token(context)) {
+            reply.send(RESULT_ERROR, Bundle().apply { putString("error", "Invalid history token") })
+            return
+        }
+        val method = intent.getStringExtra(EXTRA_METHOD).orEmpty()
+        val pending = goAsync()
+        try {
+            worker.execute {
+                try {
+                    reply.send(RESULT_OK, execute(context.applicationContext, method, data))
+                } catch (t: Throwable) {
+                    reply.send(RESULT_ERROR, Bundle().apply {
+                        putString("error", t.message ?: t.javaClass.simpleName)
+                    })
+                } finally {
+                    pending.finish()
+                }
+            }
+        } catch (t: Throwable) {
+            reply.send(RESULT_ERROR, Bundle().apply { putString("error", t.message) })
+            pending.finish()
+        }
+    }
 
-    override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
-        val context = requireNotNull(context)
-        val data = requireNotNull(extras)
-        if (data.getString("token") != token(context)) throw SecurityException("Invalid history token")
+    private fun execute(context: Context, method: String, data: Bundle): Bundle {
         val store = HistoryStore(context)
         return when (method) {
             "create" -> Bundle().apply { putString("id", store.create(data.getString("origin") ?: "gboard")) }
@@ -54,8 +78,17 @@ class HistoryBridge : ContentProvider() {
     }
 
     companion object {
+        const val ACTION_COMMAND = "com.jadenjsj.betterflow.action.HISTORY_COMMAND"
+        const val EXTRA_DATA = "data"
+        const val EXTRA_METHOD = "method"
+        const val EXTRA_REPLY = "reply"
+        const val RESULT_OK = 1
+        const val RESULT_ERROR = 0
         private const val PREF = "history_bridge"
         private const val KEY = "token"
+        private val worker = ThreadPoolExecutor(
+            0, 1, 20, TimeUnit.SECONDS, LinkedBlockingQueue<Runnable>(),
+        ).apply { allowCoreThreadTimeOut(true) }
 
         @Synchronized fun token(context: Context): String {
             val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
@@ -68,10 +101,8 @@ class HistoryBridge : ContentProvider() {
     }
 }
 
-/** Only called after recording stops; never sends audio over Binder while the mic is active. */
+/** Sends audio only after recording stops; one acknowledged 128 KiB chunk at a time. */
 class HookHistoryBridge(private val context: Context, private val token: String) {
-    private val uri = Uri.parse("content://${BuildConfig.APPLICATION_ID}.history")
-
     fun save(pcm: ByteArray): String {
         val id = call("create", Bundle().apply { putString("origin", "gboard") }).getString("id")!!
         var offset = 0
@@ -99,6 +130,25 @@ class HookHistoryBridge(private val context: Context, private val token: String)
 
     private fun call(method: String, data: Bundle): Bundle {
         data.putString("token", token)
-        return requireNotNull(context.contentResolver.call(uri, method, null, data)) { "History bridge unavailable" }
+        val latch = CountDownLatch(1)
+        val status = AtomicInteger(HistoryBridge.RESULT_ERROR)
+        val response = AtomicReference<Bundle?>(null)
+        val reply = object : ResultReceiver(null) {
+            override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
+                status.set(resultCode)
+                response.set(resultData)
+                latch.countDown()
+            }
+        }
+        context.sendBroadcast(Intent(HistoryBridge.ACTION_COMMAND)
+            .setComponent(ComponentName(BuildConfig.APPLICATION_ID, HistoryBridge::class.java.name))
+            .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+            .putExtra(HistoryBridge.EXTRA_METHOD, method)
+            .putExtra(HistoryBridge.EXTRA_DATA, data)
+            .putExtra(HistoryBridge.EXTRA_REPLY, reply))
+        check(latch.await(10, TimeUnit.SECONDS)) { "History write timed out" }
+        val result = response.get() ?: Bundle.EMPTY
+        check(status.get() == HistoryBridge.RESULT_OK) { result.getString("error") ?: "History write failed" }
+        return result
     }
 }

@@ -582,6 +582,7 @@ class BetterFlowXposedModule : XposedModule() {
                 historyId = runCatching { clients.history.save(pcm) }
                     .onFailure { moduleLog("$TAG could not archive Gboard audio: ${it.message}", it) }
                     .getOrNull()
+                historyId?.let { moduleLog("$TAG Gboard audio archived id=$it bytes=${pcm.size}") }
                 historyId?.let { id -> runCatching { clients.history.attempt(id) } }
                 text = if (clients.legacyOnly) {
                     engine = "legacy_http"
