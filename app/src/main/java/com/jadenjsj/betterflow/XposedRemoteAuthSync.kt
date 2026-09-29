@@ -16,6 +16,7 @@ object XposedRemoteAuthSync {
     const val KEY_LEGACY_TRANSCRIPTION = "legacy_transcription"
     const val KEY_PRESERVE_PRE_TAP_AUDIO = "preserve_pre_tap_audio"
     const val KEY_AUDIO_DRAIN_TIMEOUT_MS = "audio_drain_timeout_ms"
+    const val KEY_HISTORY_TOKEN = "history_token"
 
     @Volatile private var appContext: Context? = null
     @Volatile private var service: XposedService? = null
@@ -56,6 +57,7 @@ object XposedRemoteAuthSync {
                 .remove(KEY_LEGACY_TRANSCRIPTION)
                 .remove(KEY_PRESERVE_PRE_TAP_AUDIO)
                 .remove(KEY_AUDIO_DRAIN_TIMEOUT_MS)
+                .remove(KEY_HISTORY_TOKEN)
             if (session != null) {
                 edit.putString(KEY_EMAIL, session.email)
                     .putString(KEY_ACCESS, session.accessToken)
@@ -68,6 +70,7 @@ object XposedRemoteAuthSync {
                 edit.putBoolean(KEY_LEGACY_TRANSCRIPTION, Prefs.legacyTranscription(context))
                 edit.putBoolean(KEY_PRESERVE_PRE_TAP_AUDIO, Prefs.preservePreTapAudio(context))
                 edit.putInt(KEY_AUDIO_DRAIN_TIMEOUT_MS, Prefs.audioDrainTimeoutMs(context))
+                edit.putString(KEY_HISTORY_TOKEN, HistoryBridge.token(context))
             }
             check(edit.commit()) { "remote preference commit returned false" }
             Log.i(TAG, if (session != null) "Wispr auth synced to LSPosed remote prefs" else "Wispr auth cleared from LSPosed remote prefs")

@@ -42,7 +42,7 @@ class WisprClient(private val auth: WisprSessionStore) {
         session
     }
 
-    suspend fun transcribe(wav: ByteArray): String = withContext(Dispatchers.IO) {
+    suspend fun transcribe(wav: ByteArray, onRawResponse: (String) -> Unit = {}): String = withContext(Dispatchers.IO) {
         val session = freshSession()
         val payload = JSONObject().put("audio", Base64.encodeToString(wav, Base64.NO_WRAP))
         val attempts = listOf(session.accessToken, "Bearer ${session.accessToken}")
@@ -55,6 +55,7 @@ class WisprClient(private val auth: WisprSessionStore) {
                     mapOf("Authorization" to authorization),
                     trackTranscription = true,
                 )
+                onRawResponse(result.toString())
                 result.optString("text").takeIf { it.isNotBlank() }?.let { return@withContext it }
                 throw IllegalStateException("Wispr returned no text: $result")
             } catch (t: HttpStatusException) {
@@ -68,7 +69,7 @@ class WisprClient(private val auth: WisprSessionStore) {
 
     suspend fun freshAccessToken(): String = withContext(Dispatchers.IO) { freshSession().accessToken }
 
-    suspend fun transcribeLegacyPcm(pcm: ByteArray): String {
+    suspend fun transcribeLegacyPcm(pcm: ByteArray, onRawResponse: (String) -> Unit = {}): String {
         if (pcm.isEmpty()) throw IllegalStateException("No recorded audio")
         val maxChunkBytes = AudioRecorderController.SAMPLE_RATE *
             AudioRecorderController.CHANNELS *
@@ -81,7 +82,7 @@ class WisprClient(private val auth: WisprSessionStore) {
             val end = minOf(pcm.size, offset + maxChunkBytes)
             val chunk = pcm.copyOfRange(offset, end)
             try {
-                val text = transcribe(AudioRecorderController.pcmToWav(chunk)).trim()
+                val text = transcribe(AudioRecorderController.pcmToWav(chunk), onRawResponse).trim()
                 if (text.isNotEmpty()) texts += text else skippedEmpty++
             } catch (t: IllegalStateException) {
                 if (t.message?.contains("returned no text", ignoreCase = true) == true) {

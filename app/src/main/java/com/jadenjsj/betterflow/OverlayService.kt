@@ -7,6 +7,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ComponentName
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -41,6 +43,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.max
+import org.json.JSONArray
+import org.json.JSONObject
 
 class OverlayService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -48,6 +52,7 @@ class OverlayService : Service() {
     private lateinit var wispr: WisprClient
     private lateinit var streaming: WisprStreamingClient
     private lateinit var injector: InputInjector
+    private lateinit var history: HistoryStore
     private lateinit var windowManager: WindowManager
     private var bubble: View? = null
     private var bubbleImage: ImageView? = null
@@ -57,6 +62,7 @@ class OverlayService : Service() {
     private var operationGeneration = 0L
     private var legacyForCurrentRecording = false
     private var currentPcm = ByteArray(0)
+    private var currentHistoryId: String? = null
     private var processingJob: Job? = null
     private var captureFinalizeJob: Job? = null
     private var streamWorker: Job? = null
@@ -73,6 +79,7 @@ class OverlayService : Service() {
         wispr = WisprClient(applicationContext)
         streaming = WisprStreamingClient(applicationContext)
         injector = InputInjector(applicationContext)
+        history = HistoryStore(applicationContext)
         windowManager = getSystemService(WindowManager::class.java)
         ensureNotificationChannel()
         VoiceRuntimeState.wireName = BubbleState.IDLE.wireName
@@ -447,6 +454,7 @@ class OverlayService : Service() {
         val generation = operationGeneration
         legacyForCurrentRecording = Prefs.legacyTranscription(this)
         currentPcm = ByteArray(0)
+        currentHistoryId = null
         streamingFailure = null
         streamStopRequested = false
         streamCaptureFinalized = false
@@ -575,9 +583,13 @@ class OverlayService : Service() {
                 drainTimeoutMs = drainTimeoutMs,
                 cutoffNanos = cutoffNanos,
             )
+            val savedId = if (captured.isNotEmpty()) runCatching { history.save("bubble", captured) }
+                .onFailure { Log.e(TAG, "Could not save audio history", it) }.getOrNull() else null
+            if (!legacyForCurrentRecording) savedId?.let { id -> runCatching { history.beginAttempt(id) } }
             withContext(Dispatchers.Main.immediate) {
                 if (generation != operationGeneration || state != BubbleState.PROCESSING) return@withContext
                 currentPcm = captured
+                currentHistoryId = savedId
                 streamCaptureFinalized = true
                 captureFinalizeJob = null
 
@@ -619,7 +631,13 @@ class OverlayService : Service() {
                 return
             }
         }
-        startTranscriptDelivery(result.text, generation, "streaming")
+        val raw = JSONObject()
+            .put("raw_text", result.rawText)
+            .put("formatted_text", result.formattedText)
+            .put("audio_duration_seconds", result.audioDurationSeconds)
+            .put("audio_received_seconds", result.audioReceivedSeconds)
+            .toString()
+        startTranscriptDelivery(result.text, generation, "streaming", raw)
     }
 
     private fun startLegacyFallback(pcm: ByteArray, generation: Long, reason: String) {
@@ -627,44 +645,63 @@ class OverlayService : Service() {
         Log.i(TAG, "starting legacy HTTP fallback: $reason")
         processingJob?.cancel()
         processingJob = scope.launch {
+            val raw = JSONArray()
             try {
-                val transcript = wispr.transcribeLegacyPcm(pcm)
+                currentHistoryId?.let { id -> runCatching { withContext(Dispatchers.IO) { history.beginAttempt(id) } } }
+                val transcript = wispr.transcribeLegacyPcm(pcm) { raw.put(it) }
                 if (generation != operationGeneration || state != BubbleState.PROCESSING) return@launch
-                deliverTranscript(transcript, generation, "legacy_http")
+                deliverTranscript(transcript, generation, "legacy_http", raw.toString())
             } catch (_: CancellationException) {
                 // User cancellation is intentionally silent.
             } catch (t: Throwable) {
                 if (generation != operationGeneration || state != BubbleState.PROCESSING) return@launch
                 Log.e(TAG, "legacy transcription failed", t)
-                Toast.makeText(this@OverlayService, "betterFlow failed: ${t.message}", Toast.LENGTH_LONG).show()
+                currentHistoryId?.let { id -> runCatching { withContext(Dispatchers.IO) { history.failure(id, t.message ?: "Transcription failed", raw.toString()) } } }
+                currentHistoryId?.let { id -> HistoryNotifier.show(this@OverlayService, id, "Transcription failed. Tap to retry the saved audio.") }
+                Toast.makeText(this@OverlayService, "betterFlow failed; open History to retry", Toast.LENGTH_LONG).show()
                 finishOperation(generation)
             }
         }
     }
 
-    private fun startTranscriptDelivery(text: String, generation: Long, source: String) {
+    private fun startTranscriptDelivery(text: String, generation: Long, source: String, raw: String = "") {
         processingJob?.cancel()
         processingJob = scope.launch {
-            deliverTranscript(text, generation, source)
+            deliverTranscript(text, generation, source, raw)
         }
     }
 
-    private suspend fun deliverTranscript(text: String, generation: Long, source: String) {
+    private suspend fun deliverTranscript(text: String, generation: Long, source: String, raw: String = "") {
         if (generation != operationGeneration || state != BubbleState.PROCESSING) return
         try {
+            currentHistoryId?.let { id -> runCatching {
+                withContext(Dispatchers.IO) { history.result(id, text, source, raw) }
+            }.onFailure { Log.e(TAG, "Could not save transcript history", it) } }
             val result = injector.inject(text)
             if (generation != operationGeneration || state != BubbleState.PROCESSING) return
             val message = if (result.success) {
                 "Inserted via ${result.backend.wireName} ($source)"
             } else {
-                "Could not insert automatically; transcript is in the clipboard if fallback ran"
+                getSystemService(ClipboardManager::class.java)
+                    .setPrimaryClip(ClipData.newPlainText("betterFlow transcript", text))
+                "Insertion failed; text copied and saved in History"
+            }
+            currentHistoryId?.let { id -> runCatching { withContext(Dispatchers.IO) {
+                history.insertion(id, if (result.success) "${result.backend.wireName}:inserted" else "${result.backend.wireName}:failed")
+            } }.onFailure { Log.e(TAG, "Could not save insertion status", it) } }
+            if (!result.success) currentHistoryId?.let { id ->
+                HistoryNotifier.show(this, id, "Text was not inserted. Tap to copy it from History.")
             }
             Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
         } catch (_: CancellationException) {
             return
         } catch (t: Throwable) {
             if (generation == operationGeneration && state == BubbleState.PROCESSING) {
-                Toast.makeText(this, "betterFlow failed: ${t.message}", Toast.LENGTH_LONG).show()
+                runCatching { getSystemService(ClipboardManager::class.java)
+                    .setPrimaryClip(ClipData.newPlainText("betterFlow transcript", text)) }
+                currentHistoryId?.let { id -> runCatching { withContext(Dispatchers.IO) { history.insertion(id, "failed:${t.message}") } } }
+                currentHistoryId?.let { id -> HistoryNotifier.show(this, id, "Text was not inserted. Tap to copy it from History.") }
+                Toast.makeText(this, "Text copied; open History if needed", Toast.LENGTH_LONG).show()
             }
         } finally {
             if (generation == operationGeneration && state == BubbleState.PROCESSING) {
@@ -675,6 +712,9 @@ class OverlayService : Service() {
 
     private fun cancelProcessing() {
         if (state != BubbleState.PROCESSING) return
+        currentHistoryId?.let { id -> scope.launch(Dispatchers.IO) {
+            runCatching { history.failure(id, "Cancelled while processing; audio can be retried") }
+        } }
         operationGeneration++
         streamQueueEnabled.set(false)
         streamStopRequested = true
@@ -692,6 +732,7 @@ class OverlayService : Service() {
         streamQueue = null
         streamingFailure = null
         currentPcm = ByteArray(0)
+        currentHistoryId = null
         Log.i(TAG, "processing cancelled by user")
         updateState(BubbleState.IDLE)
         if (!Prefs.bubbleVisible(this)) stopSelf()
@@ -715,6 +756,7 @@ class OverlayService : Service() {
         processingJob = null
         streamingFailure = null
         currentPcm = ByteArray(0)
+        currentHistoryId = null
         updateState(BubbleState.IDLE)
         if (!Prefs.bubbleVisible(this)) stopSelf()
     }

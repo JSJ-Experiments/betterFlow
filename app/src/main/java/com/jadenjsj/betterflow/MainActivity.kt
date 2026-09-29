@@ -51,7 +51,8 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             RootShell.setBubbleBootEnabled(Prefs.bubbleVisible(this@MainActivity))
         }
-        setContent { MaterialTheme { SettingsScreen() } }
+        val openHistory = intent?.getBooleanExtra(HistoryNotifier.EXTRA_OPEN_HISTORY, false) == true
+        setContent { MaterialTheme { SettingsScreen(openHistory) } }
     }
 }
 
@@ -66,7 +67,7 @@ private fun refreshOverlayConfig(context: Context) {
 }
 
 @Composable
-private fun SettingsScreen() {
+private fun SettingsScreen(openHistory: Boolean) {
     val context = LocalContext.current
     val auth = remember { AuthStore(context) }
     val client = remember { WisprClient(context) }
@@ -88,6 +89,12 @@ private fun SettingsScreen() {
     var sessionJson by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("Ready") }
     var rootStatus by remember { mutableStateOf("Not checked") }
+    var showHistory by remember { mutableStateOf(openHistory) }
+
+    if (showHistory) {
+        HistoryScreen(onBack = { showHistory = false })
+        return
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         status = if (result.values.all { it }) "Runtime permissions granted" else "Some runtime permissions were denied"
@@ -99,6 +106,7 @@ private fun SettingsScreen() {
     ) {
         Text("betterFlow", style = MaterialTheme.typography.headlineMedium)
         Text("Gboard mic voice typing + optional floating bubble. Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}).")
+        Button(onClick = { showHistory = true }) { Text("History · retry, copy, play, export") }
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

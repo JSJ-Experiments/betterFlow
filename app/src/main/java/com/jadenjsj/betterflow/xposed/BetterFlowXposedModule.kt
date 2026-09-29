@@ -1,6 +1,8 @@
 package com.jadenjsj.betterflow.xposed
 
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -23,6 +25,7 @@ import com.jadenjsj.betterflow.AudioRecorderController
 import com.jadenjsj.betterflow.AuthStore
 import com.jadenjsj.betterflow.BuildConfig
 import com.jadenjsj.betterflow.InputInjector
+import com.jadenjsj.betterflow.HookHistoryBridge
 import com.jadenjsj.betterflow.Prefs
 import com.jadenjsj.betterflow.WisprClient
 import com.jadenjsj.betterflow.WisprSession
@@ -36,6 +39,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.lang.ref.WeakReference
 import java.util.ArrayDeque
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.LinkedHashMap
 import java.util.WeakHashMap
 import java.util.concurrent.CountDownLatch
@@ -400,6 +405,7 @@ class BetterFlowXposedModule : XposedModule() {
         val legacyOnly: Boolean,
         val preservePreTapAudio: Boolean,
         val audioDrainTimeoutMs: Int,
+        val history: HookHistoryBridge,
     )
 
     private class HookSessionStore(private val prefs: SharedPreferences) : WisprSessionStore {
@@ -462,6 +468,11 @@ class BetterFlowXposedModule : XposedModule() {
                 REMOTE_KEY_AUDIO_DRAIN_TIMEOUT_MS,
                 Prefs.DEFAULT_AUDIO_DRAIN_TIMEOUT_MS,
             ).coerceIn(Prefs.MIN_AUDIO_DRAIN_TIMEOUT_MS, Prefs.MAX_AUDIO_DRAIN_TIMEOUT_MS),
+            history = HookHistoryBridge(
+                requireNotNull(currentIme?.get()) { "Gboard service unavailable" },
+                prefs.getString(REMOTE_KEY_HISTORY_TOKEN, null)
+                    ?: error("History bridge is not synced; open betterFlow once"),
+            ),
         )
     }
 
@@ -558,6 +569,9 @@ class BetterFlowXposedModule : XposedModule() {
         Thread({
             var text: String? = null
             var error: Throwable? = null
+            var historyId: String? = null
+            var engine = "streaming"
+            val rawResponses = JSONArray()
             try {
                 val pcm = hookRecorder.stopAndGetPcm(
                     preservePreTapTail = clients.preservePreTapAudio,
@@ -565,27 +579,45 @@ class BetterFlowXposedModule : XposedModule() {
                     cutoffNanos = cutoffNanos,
                 )
                 check(pcm.isNotEmpty()) { "no microphone audio captured" }
+                historyId = runCatching { clients.history.save(pcm) }
+                    .onFailure { moduleLog("$TAG could not archive Gboard audio: ${it.message}", it) }
+                    .getOrNull()
+                historyId?.let { id -> runCatching { clients.history.attempt(id) } }
                 text = if (clients.legacyOnly) {
-                    runBlocking { clients.wispr.transcribeLegacyPcm(pcm) }.trim()
+                    engine = "legacy_http"
+                    runBlocking { clients.wispr.transcribeLegacyPcm(pcm) { rawResponses.put(it) } }.trim()
                 } else {
-                    runCatching { transcribeHookStream(generation) }
+                    runCatching { transcribeHookStream(generation) { result ->
+                        rawResponses.put(JSONObject()
+                            .put("raw_text", result.rawText)
+                            .put("formatted_text", result.formattedText)
+                            .put("audio_duration_seconds", result.audioDurationSeconds)
+                            .put("audio_received_seconds", result.audioReceivedSeconds))
+                    } }
                         .getOrElse { streamError ->
                             moduleLog("$TAG in-process streaming failed; using legacy fallback: ${streamError.message}", streamError)
-                            runBlocking { clients.wispr.transcribeLegacyPcm(pcm) }
+                            engine = "legacy_http"
+                            runBlocking { clients.wispr.transcribeLegacyPcm(pcm) { rawResponses.put(it) } }
                         }
                         .trim()
                 }
                 check(text.isNotBlank()) { "Wispr returned empty text" }
+                historyId?.let { id -> runCatching { clients.history.result(id, text, engine, rawResponses.toString()) }
+                    .onFailure { moduleLog("$TAG could not archive transcript: ${it.message}", it) } }
             } catch (t: Throwable) {
                 error = t
+                historyId?.let { id -> runCatching { clients.history.failure(id, t.message ?: t.javaClass.simpleName, rawResponses.toString()) } }
             }
             Handler(service.mainLooper).post {
-                finishHookVoice(service, generation, text, error)
+                finishHookVoice(service, generation, text, error, historyId, clients.history)
             }
         }, "betterflow-gboard-transcribe").start()
     }
 
-    private fun transcribeHookStream(generation: Long): String {
+    private fun transcribeHookStream(
+        generation: Long,
+        onResult: (WisprStreamingClient.Result) -> Unit,
+    ): String {
         if (!hookStreamReady.await(HOOK_STREAM_OPEN_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
             throw IllegalStateException("Wispr stream open timed out")
         }
@@ -602,6 +634,7 @@ class BetterFlowXposedModule : XposedModule() {
         val result = runBlocking {
             withTimeout(HOOK_STREAM_RESULT_TIMEOUT_MS) { session.awaitResult() }
         }
+        onResult(result)
         return result.text
     }
 
@@ -610,6 +643,8 @@ class BetterFlowXposedModule : XposedModule() {
         generation: Long,
         text: String?,
         error: Throwable?,
+        historyId: String?,
+        history: HookHistoryBridge,
     ) {
         if (hookOperationGeneration != generation) return
         if (error != null) {
@@ -622,7 +657,18 @@ class BetterFlowXposedModule : XposedModule() {
                 moduleLog("$TAG in-process transcription committed through Gboard InputConnection (${text.length} chars)")
             } else {
                 moduleLog("$TAG transcription ready but Gboard InputConnection is unavailable")
-                android.widget.Toast.makeText(service, "betterFlow: text ready but input field was lost", android.widget.Toast.LENGTH_LONG).show()
+                runCatching {
+                    service.getSystemService(ClipboardManager::class.java)
+                        .setPrimaryClip(ClipData.newPlainText("betterFlow transcript", text))
+                }
+                android.widget.Toast.makeText(service,
+                    if (historyId != null) "betterFlow: text copied and saved in History" else "betterFlow: text copied; History unavailable",
+                    android.widget.Toast.LENGTH_LONG).show()
+            }
+            if (ok && historyId == null) android.widget.Toast.makeText(service,
+                "betterFlow: text inserted but History was unavailable", android.widget.Toast.LENGTH_LONG).show()
+            historyId?.let { id ->
+                Thread({ runCatching { history.insertion(id, if (ok) "committed" else "failed") } }, "betterflow-history-status").start()
             }
         }
         clearHookVoiceState(cancelSession = false)
@@ -736,6 +782,7 @@ class BetterFlowXposedModule : XposedModule() {
         private const val REMOTE_KEY_LEGACY_TRANSCRIPTION = "legacy_transcription"
         private const val REMOTE_KEY_PRESERVE_PRE_TAP_AUDIO = "preserve_pre_tap_audio"
         private const val REMOTE_KEY_AUDIO_DRAIN_TIMEOUT_MS = "audio_drain_timeout_ms"
+        private const val REMOTE_KEY_HISTORY_TOKEN = "history_token"
         private const val HOOK_STREAM_OPEN_TIMEOUT_MS = 20_000L
         private const val HOOK_STREAM_RESULT_TIMEOUT_MS = 30_000L
         private const val COMMIT_DEDUPE_TTL_MS = 10_000L

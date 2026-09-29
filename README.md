@@ -7,6 +7,7 @@ Root-first Android voice typing that stays available, transcribes through Wispr 
 - **Gboard trigger:** in-process, event-driven mic interception and transcription. It does not ping or wake Gboard in the background.
 - **Optional floating APK service:** draggable tap-to-record bubble using a foreground service only while the bubble is enabled.
 - **Wispr client:** email login or session JSON import, automatic refresh-token renewal, HTTP transcription fallback.
+- **Capture history:** every completed bubble/Gboard recording is saved locally as lossless 16 kHz mono PCM WAV plus JSON metadata, transcript, provider response, attempt count, and insertion outcome. The app's History screen plays audio, retries transcription from the saved sample, copies text, and exports a portable ZIP with `dataset.jsonl`.
 - **Selectable insertion:**
   - **Auto:** direct `InputConnection.commitText()` through an LSPosed IME bridge, then root clipboard + `KEYCODE_PASTE` fallback.
   - **LSPosed:** direct InputConnection only.
@@ -24,6 +25,8 @@ Root-first Android voice typing that stays available, transcribes through Wispr 
 KernelSU's **Action** button checks for and applies the newest release without rebooting. Updates are manual, so betterFlow performs no periodic network or process polling.
 
 With the floating microphone disabled, betterFlow has no long-running app service. Gboard voice typing remains available through the LSPosed hook and only does work in response to keyboard lifecycle and touch events.
+
+History retries and exports are manual: there is no periodic sync, background retry loop, or idle audio work. Captures live in app-private storage and survive app updates, but not uninstall/data clearing; export a ZIP before either. Audio and transcripts may be sensitive, so the ZIP should be handled accordingly. If automatic insertion fails, betterFlow copies the transcript to the clipboard and keeps it in History. Failed transcription/insertion can also raise a tap-to-open History notification when notification permission is granted.
 
 ## CI
 
