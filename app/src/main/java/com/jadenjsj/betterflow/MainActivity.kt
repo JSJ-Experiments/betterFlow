@@ -434,6 +434,20 @@ private fun SettingsScreen(openHistory: Boolean) {
                     }
                 }
                 Text("Add another account by signing in or importing its session below. Saved sessions stay private on this device.", style = MaterialTheme.typography.bodySmall)
+                BrowserSignInControls(
+                    busy = signingIn,
+                    onBusyChanged = { signingIn = it },
+                    onAuthenticated = { signedIn ->
+                        auth.activate(signedIn)
+                        reloadAccounts()
+                        email = signedIn.email
+                        password = ""
+                        emailVerification = null
+                        verificationCode = ""
+                    },
+                    onStatus = { status = it },
+                )
+                Text("Existing email/password sign-in", style = MaterialTheme.typography.titleSmall)
                 OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text("Email") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(
                     value = password,

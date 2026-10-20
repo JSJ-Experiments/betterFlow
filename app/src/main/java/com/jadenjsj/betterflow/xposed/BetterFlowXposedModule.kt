@@ -24,6 +24,7 @@ import com.jadenjsj.betterflow.AuthStore
 import com.jadenjsj.betterflow.BuildConfig
 import com.jadenjsj.betterflow.InputInjector
 import com.jadenjsj.betterflow.HookHistoryBridge
+import com.jadenjsj.betterflow.HistoryBridge
 import com.jadenjsj.betterflow.Prefs
 import com.jadenjsj.betterflow.TranscriptClipboard
 import com.jadenjsj.betterflow.WisprAuthProvider
@@ -138,6 +139,23 @@ class BetterFlowXposedModule : XposedModule() {
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context?, intent: Intent?) {
                     when (intent?.action) {
+                        InputInjector.ACTION_SYNC_HISTORY -> {
+                            val reply = if (Build.VERSION.SDK_INT >= 33) {
+                                intent.getParcelableExtra(InputInjector.EXTRA_RESULT_RECEIVER, ResultReceiver::class.java)
+                            } else {
+                                @Suppress("DEPRECATION")
+                                intent.getParcelableExtra<ResultReceiver>(InputInjector.EXTRA_RESULT_RECEIVER)
+                            }
+                            val token = remoteHookPreferences()?.getString(REMOTE_KEY_HISTORY_TOKEN, null)
+                            if (service.packageName != GBOARD_PACKAGE || token.isNullOrBlank()) {
+                                reply?.send(HistoryBridge.RESULT_ERROR, Bundle.EMPTY)
+                            } else {
+                                HookHistoryBridge(service, token).retryPending { pending ->
+                                    reply?.send(HistoryBridge.RESULT_OK, Bundle().apply { putInt("pending", pending) })
+                                }
+                            }
+                            return
+                        }
                         InputInjector.ACTION_VOICE_STATE -> {
                             if (hookOwnsVoiceSession) return
                             voiceState = VoiceState.fromWire(intent.getStringExtra(InputInjector.EXTRA_VOICE_STATE))
@@ -198,6 +216,7 @@ class BetterFlowXposedModule : XposedModule() {
                 addAction(InputInjector.ACTION_COMMIT_TEXT)
                 addAction(InputInjector.ACTION_VOICE_STATE)
                 addAction(InputInjector.ACTION_CONFIG_CHANGED)
+                addAction(InputInjector.ACTION_SYNC_HISTORY)
             }
             if (Build.VERSION.SDK_INT >= 33) {
                 service.registerReceiver(receiver, filter, InputInjector.COMMIT_PERMISSION, null, Context.RECEIVER_EXPORTED)

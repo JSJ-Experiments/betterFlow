@@ -39,6 +39,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.DateFormat
@@ -54,15 +55,33 @@ fun HistoryScreen(onBack: () -> Unit) {
     var entries by remember { mutableStateOf<List<HistoryStore.Entry>>(emptyList()) }
     var busyId by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf("") }
+    var syncing by remember { mutableStateOf(false) }
+    var syncMessage by remember { mutableStateOf("") }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     var playingId by remember { mutableStateOf<String?>(null) }
     val lifecycleOwner = LocalLifecycleOwner.current
 
     suspend fun refresh() { entries = withContext(Dispatchers.IO) { store.list() } }
-    LaunchedEffect(Unit) { refresh() }
+    suspend fun syncAndRefresh() {
+        if (syncing) return
+        syncing = true
+        syncMessage = "Checking pending Gboard recordings…"
+        try {
+            refresh() // Show already-saved captures without waiting for the keyboard.
+            syncMessage = HistoryBridge.requestPending(context)
+            refresh()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            syncMessage = "Could not refresh history. Reopen the keyboard and try again."
+        } finally {
+            syncing = false
+        }
+    }
+    LaunchedEffect(Unit) { syncAndRefresh() }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) scope.launch { refresh() }
+            if (event == Lifecycle.Event.ON_RESUME) scope.launch { syncAndRefresh() }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -101,7 +120,10 @@ fun HistoryScreen(onBack: () -> Unit) {
             }
         }
         Text("History", style = MaterialTheme.typography.headlineMedium)
-        TextButton(onClick = { scope.launch { refresh() } }) { Text("Refresh history") }
+        TextButton(enabled = !syncing, onClick = { scope.launch { syncAndRefresh() } }) {
+            Text(if (syncing) "Syncing Gboard…" else "Refresh history")
+        }
+        if (syncMessage.isNotBlank()) Text(syncMessage, style = MaterialTheme.typography.bodySmall)
         Text("Lossless WAV + transcript and capture metadata stay on this device until you remove the app. Export includes dataset.jsonl. Retries only run when tapped.", style = MaterialTheme.typography.bodySmall)
         if (message.isNotBlank()) Text(message)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {

@@ -95,6 +95,7 @@ class InputInjector(private val context: Context) {
         const val ACTION_COMMIT_TEXT = "com.jadenjsj.betterflow.action.COMMIT_TEXT"
         const val ACTION_VOICE_STATE = "com.jadenjsj.betterflow.action.VOICE_STATE"
         const val ACTION_CONFIG_CHANGED = "com.jadenjsj.betterflow.action.CONFIG_CHANGED"
+        const val ACTION_SYNC_HISTORY = "com.jadenjsj.betterflow.action.SYNC_HISTORY"
         const val COMMIT_PERMISSION = "com.jadenjsj.betterflow.permission.COMMIT_TEXT"
         const val EXTRA_TEXT = "text"
         const val EXTRA_REQUEST_ID = "request_id"

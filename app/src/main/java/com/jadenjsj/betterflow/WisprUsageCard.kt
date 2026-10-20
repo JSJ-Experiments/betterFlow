@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Card
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -26,6 +27,7 @@ import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
 import java.util.TimeZone
+import kotlin.math.roundToInt
 
 /** Fetch on screen resume or explicit refresh, never through a periodic usage poll. */
 @Composable
@@ -78,6 +80,15 @@ fun WisprUsageCard(session: WisprSession?, client: WisprClient) {
                 usage?.let { value ->
                     value.plan?.let { Text("Plan: $it") }
                     Text("Words this week: ${value.usedWords?.toString() ?: "unavailable"}")
+                    value.usageFraction?.let { fraction ->
+                        LinearProgressIndicator(
+                            progress = { fraction },
+                            modifier = Modifier.fillMaxWidth(),
+                            color = if (value.exhausted) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        )
+                        Text("${(fraction * 100).roundToInt()}% of weekly allowance used",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
                     when (value.isLimited) {
                         true -> {
                             Text("Weekly allowance: ${value.limitWords?.toString() ?: "unavailable"} words")

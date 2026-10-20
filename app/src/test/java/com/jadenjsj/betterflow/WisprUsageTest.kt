@@ -19,6 +19,17 @@ class WisprUsageTest {
         WisprUsage.fromResponses(history, JSONObject().put("plan", plan), 1_000L)
 
     @Test
+    fun usageBarShowsRealFractionAndClampsGraceUsage() {
+        assertEquals(0f, usage(testUsageHistory(0)).usageFraction!!, 0.0001f)
+        assertEquals(0.25f, usage(testUsageHistory(250)).usageFraction!!, 0.0001f)
+        assertEquals(1f, usage(testUsageHistory(1_200)).usageFraction!!, 0.0001f)
+        assertNull(usage(testUsageHistory(JSONObject.NULL)).usageFraction)
+        assertNull(usage(testUsageHistory(900, soft = 0)).usageFraction)
+        assertNull(usage(testUsageHistory(900), "FLOW_PRO_MONTHLY").usageFraction)
+        assertNull(usage(testUsageHistory(900), "UNKNOWN_PLAN").usageFraction)
+    }
+
+    @Test
     fun readsOnlyAuthoritativeMobileUsageAndServedAndroidLimits() {
         val result = usage(testUsageHistory())
         assertEquals(900L, result.usedWords)

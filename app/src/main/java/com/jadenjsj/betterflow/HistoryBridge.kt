@@ -14,6 +14,8 @@ import org.json.JSONObject
 import okhttp3.OkHttpClient
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.security.SecureRandom
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
@@ -164,6 +166,30 @@ class HistoryBridge : BroadcastReceiver() {
         const val RESULT_ERROR = 0
         private const val PREF = "history_bridge"
         private const val KEY = "token"
+
+        /** Ask the live hooked keyboard to drain its private outbox, not just reload local rows. */
+        suspend fun requestPending(context: Context): String = withContext(Dispatchers.IO) {
+            val latch = CountDownLatch(1)
+            val remaining = AtomicInteger(-1)
+            val reply = object : ResultReceiver(null) {
+                override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
+                    if (resultCode == RESULT_OK) remaining.set(resultData?.getInt("pending", -1) ?: -1)
+                    latch.countDown()
+                }
+            }
+            // The Gboard receiver requires our signature permission. Never send auth/audio here.
+            context.sendBroadcast(Intent(InputInjector.ACTION_SYNC_HISTORY)
+                .setPackage("com.google.android.inputmethod.latin")
+                .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+                .putExtra(InputInjector.EXTRA_RESULT_RECEIVER, reply))
+            if (!latch.await(12, TimeUnit.SECONDS)) {
+                "Gboard did not confirm sync. Check that the updated LSPosed module is enabled for Gboard, then reopen the keyboard and retry."
+            } else when (remaining.get()) {
+                0 -> "Gboard history is up to date."
+                -1 -> "Gboard history sync could not be checked. Reopen the keyboard and retry."
+                else -> "History refreshed. ${remaining.get()} Gboard recording(s) remain pending; active transcription or a failed handoff will retry on the next refresh."
+            }
+        }
         private val authHttpClient = OkHttpClient.Builder()
             .callTimeout(7, TimeUnit.SECONDS)
             .connectTimeout(5, TimeUnit.SECONDS)
@@ -232,30 +258,26 @@ class HookHistoryBridge(private val context: Context, private val token: String)
         retryPending()
     }
 
-    /** Called by keyboard lifecycle/capture events only, never by a timer. */
-    fun retryPending() {
-        synchronized(requestLock) {
-            requestedBridge = this
-            if (syncScheduled) return
-            syncScheduled = true
-            syncWorker.execute {
-                while (true) {
-                    val bridge = synchronized(requestLock) {
-                        val next = requestedBridge
-                        requestedBridge = null
-                        if (next == null) syncScheduled = false
-                        next
-                    } ?: break
-                    val ids = synchronized(outboxLock) { bridge.outbox.ids() }
-                    for (id in ids) {
-                        runCatching { bridge.sync(id) }.onFailure {
-                            // Avoid logging audio, transcript, authentication, or provider response.
-                            Log.w("betterFlow/History", "Gboard history sync pending (${it.javaClass.simpleName})")
-                        }
-                    }
-                }
+    /** Called by keyboard events or an explicit companion refresh, never by a timer. */
+    fun retryPending(onComplete: ((Int) -> Unit)? = null) {
+        val acknowledge: (() -> Unit)? = onComplete?.let { callback ->
+            {
+                val remaining = runCatching { synchronized(outboxLock) { outbox.ids().size } }.getOrDefault(-1)
+                callback(remaining)
             }
         }
+        drainQueue.request(work = {
+            val ids = runCatching { synchronized(outboxLock) { outbox.ids() } }.getOrElse {
+                Log.w("betterFlow/History", "Gboard history scan pending (${it.javaClass.simpleName})")
+                emptyList()
+            }
+            for (id in ids) {
+                runCatching { sync(id) }.onFailure {
+                    // Avoid logging audio, transcript, authentication, or provider response.
+                    Log.w("betterFlow/History", "Gboard history sync pending (${it.javaClass.simpleName})")
+                }
+            }
+        }, acknowledged = acknowledge)
     }
 
     private fun sync(id: String) {
@@ -336,11 +358,9 @@ class HookHistoryBridge(private val context: Context, private val token: String)
 
     companion object {
         private val outboxLock = Any()
-        private val requestLock = Any()
-        private var requestedBridge: HookHistoryBridge? = null
-        private var syncScheduled = false
         private val syncWorker = ThreadPoolExecutor(
             0, 1, 20, TimeUnit.SECONDS, LinkedBlockingQueue<Runnable>(),
         ).apply { allowCoreThreadTimeOut(true) }
+        private val drainQueue = HistorySyncQueue(syncWorker)
     }
 }

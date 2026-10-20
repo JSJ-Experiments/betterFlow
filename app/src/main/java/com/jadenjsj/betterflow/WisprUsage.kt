@@ -17,6 +17,10 @@ data class WisprUsage(
     val resetAtEpochSeconds: Long,
     val limitsSource: String?,
 ) {
+    val usageFraction: Float?
+        get() = if (isLimited == true && usedWords != null && limitWords != null && limitWords > 0) {
+            (usedWords.toDouble() / limitWords).coerceIn(0.0, 1.0).toFloat()
+        } else null
     val remainingWords: Long?
         get() = if (isLimited == true && usedWords != null && limitWords != null) {
             (limitWords - usedWords).coerceAtLeast(0)
