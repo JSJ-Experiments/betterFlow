@@ -657,8 +657,9 @@ class OverlayService : Service() {
                 if (generation != operationGeneration || state != BubbleState.PROCESSING) return@launch
                 Log.e(TAG, "legacy transcription failed", t)
                 currentHistoryId?.let { id -> runCatching { withContext(Dispatchers.IO) { history.failure(id, t.message ?: "Transcription failed", raw.toString()) } } }
-                currentHistoryId?.let { id -> HistoryNotifier.show(this@OverlayService, id, "Transcription failed. Tap to retry the saved audio.") }
-                Toast.makeText(this@OverlayService, "betterFlow failed; open History to retry", Toast.LENGTH_LONG).show()
+                val failureMessage = t.message ?: "Transcription failed"
+                currentHistoryId?.let { id -> HistoryNotifier.show(this@OverlayService, id, "$failureMessage. Audio saved in History.") }
+                Toast.makeText(this@OverlayService, "$failureMessage. Open History to retry the saved recording.", Toast.LENGTH_LONG).show()
                 finishOperation(generation)
             }
         }
@@ -674,6 +675,9 @@ class OverlayService : Service() {
     private suspend fun deliverTranscript(text: String, generation: Long, source: String, raw: String = "") {
         if (generation != operationGeneration || state != BubbleState.PROCESSING) return
         try {
+            if (Prefs.autoCopyTranscript(this) && !TranscriptClipboard.copy(this, text)) {
+                Toast.makeText(this, "Auto-copy failed; transcript is available in History", Toast.LENGTH_LONG).show()
+            }
             currentHistoryId?.let { id -> runCatching {
                 withContext(Dispatchers.IO) { history.result(id, text, source, raw) }
             }.onFailure { Log.e(TAG, "Could not save transcript history", it) } }

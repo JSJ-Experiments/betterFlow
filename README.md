@@ -6,7 +6,9 @@ Root-first Android voice typing that stays available, transcribes through Wispr 
 
 - **Gboard trigger:** in-process, event-driven mic interception and transcription. It does not ping or wake Gboard in the background.
 - **Optional floating APK service:** draggable tap-to-record bubble using a foreground service only while the bubble is enabled.
-- **Wispr client:** email login or session JSON import, automatic refresh-token renewal, HTTP transcription fallback.
+- **Wispr client:** current streaming host discovery, WorkOS/Supabase sessions, email OTP login or session JSON import, automatic refresh-token renewal, and HTTP transcription fallback.
+- **Saved accounts and usage:** retain multiple private sessions, switch the active account manually, and view its weekly mobile words, allowance, reset time and hard-limit warning. Existing single-account sessions migrate automatically.
+- **Optional auto-copy:** copy every completed transcript to the clipboard as well as inserting it, including Gboard and History retries.
 - **Capture history:** every completed bubble/Gboard recording is saved locally as lossless 16 kHz mono PCM WAV plus JSON metadata, transcript, provider response, attempt count, and insertion outcome. The app's History screen plays audio, retries transcription from the saved sample, copies text, and exports a portable ZIP with `dataset.jsonl`.
 - **Selectable insertion:**
   - **Auto:** direct `InputConnection.commitText()` through an LSPosed IME bridge, then root clipboard + `KEYCODE_PASTE` fallback.
@@ -26,6 +28,8 @@ KernelSU's **Action** button checks for and applies the newest release without r
 
 With the floating microphone disabled, betterFlow has no long-running app service. Gboard voice typing remains available through the LSPosed hook and only does work in response to keyboard lifecycle and touch events.
 
+Gboard completed captures use a durable, acknowledged outbox. Failed handoffs retry on keyboard/capture lifecycle events, not an idle timer. History refreshes on resume and acknowledged updates, with a manual refresh button. A kill before a recording is staged, disk failure, or clearing Gboard data can still lose unsynced audio.
+
 History retries and exports are manual: there is no periodic sync, background retry loop, or idle audio work. Captures live in app-private storage and survive app updates, but not uninstall/data clearing; export a ZIP before either. Audio and transcripts may be sensitive, so the ZIP should be handled accordingly. If automatic insertion fails, betterFlow copies the transcript to the clipboard and keeps it in History. Failed transcription/insertion can also raise a tap-to-open History notification when notification permission is granted.
 
 ## CI
@@ -36,4 +40,4 @@ Release signing is supplied through repository secrets. User Wispr access/refres
 
 ## Development status
 
-This is an experimental root/LSPosed project. The initial build uses Wispr's HTTP audio endpoint for reliability; the recovered live gRPC protocol is kept out of the public runtime until its service credentials can be provisioned cleanly rather than compiled into the APK.
+This is an experimental root/LSPosed project. Streaming still requires a privately provisioned service credential (build secret or device setting); no extracted service key is embedded in source. HTTP fallback remains available. See [Wispr 2.8.0 compatibility notes](docs/wispr-api-2.8.0.md) for artifact provenance, API contracts and validation limits.

@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -73,7 +74,11 @@ private fun SettingsScreen(openHistory: Boolean) {
     val client = remember { WisprClient(context) }
     val coroutine = rememberCoroutineScope()
     var session by remember { mutableStateOf(auth.load()) }
+    var accounts by remember { mutableStateOf(auth.savedAccounts()) }
+    var activeAccountId by remember { mutableStateOf(auth.activeAccountId()) }
+    var removeAccountId by remember { mutableStateOf<String?>(null) }
     var backend by remember { mutableStateOf(Prefs.backend(context)) }
+    var autoCopyTranscript by remember { mutableStateOf(Prefs.autoCopyTranscript(context)) }
     var gboardMicEnabled by remember { mutableStateOf(Prefs.gboardMicEnabled(context)) }
     var bubbleEnabled by remember { mutableStateOf(Prefs.bubbleVisible(context)) }
     var bubbleSizeDp by remember { mutableStateOf(Prefs.bubbleSizeDp(context)) }
@@ -86,10 +91,39 @@ private fun SettingsScreen(openHistory: Boolean) {
     var streamingApiKey by remember { mutableStateOf("") }
     var email by remember { mutableStateOf(session?.email.orEmpty()) }
     var password by remember { mutableStateOf("") }
+    // Keep the short-lived challenge in memory only, never in preferences or history.
+    var emailVerification by remember { mutableStateOf<WisprClient.EmailVerificationRequired?>(null) }
+    var verificationCode by remember { mutableStateOf("") }
+    var signingIn by remember { mutableStateOf(false) }
     var sessionJson by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("Ready") }
     var rootStatus by remember { mutableStateOf("Not checked") }
     var showHistory by remember { mutableStateOf(openHistory) }
+
+    fun reloadAccounts() {
+        accounts = auth.savedAccounts()
+        activeAccountId = auth.activeAccountId()
+        session = auth.load()
+    }
+
+    removeAccountId?.let { id ->
+        val account = accounts.firstOrNull { it.id == id }
+        AlertDialog(
+            onDismissRequest = { removeAccountId = null },
+            title = { Text("Remove saved account?") },
+            text = { Text("Remove ${account?.session?.email.orEmpty()} from this device? Saved recordings and transcripts are kept. Other accounts are unchanged.") },
+            confirmButton = { TextButton(onClick = {
+                auth.removeAccount(id)
+                removeAccountId = null
+                reloadAccounts()
+                email = session?.email.orEmpty()
+                emailVerification = null
+                verificationCode = ""
+                status = "Saved account removed"
+            }) { Text("Remove") } },
+            dismissButton = { TextButton(onClick = { removeAccountId = null }) { Text("Cancel") } },
+        )
+    }
 
     if (showHistory) {
         HistoryScreen(onBack = { showHistory = false })
@@ -172,8 +206,8 @@ private fun SettingsScreen(openHistory: Boolean) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("Legacy transcription engine")
-                        Text("Send the completed WAV over the old HTTP endpoint instead of streaming. Streaming mode still falls back here automatically if the live stream fails.", style = MaterialTheme.typography.bodySmall)
+                        Text("Whole-file transcription engine")
+                        Text("Send the completed WAV over HTTP instead of streaming. Streaming mode also uses this fallback if the live stream fails.", style = MaterialTheme.typography.bodySmall)
                     }
                     Switch(
                         checked = legacyTranscription,
@@ -340,6 +374,16 @@ private fun SettingsScreen(openHistory: Boolean) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Text insertion", style = MaterialTheme.typography.titleMedium)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Auto-copy completed transcripts")
+                        Text("Also copy successful bubble, Gboard, and History retry results to the clipboard. This replaces your current clipboard; insertion is unchanged.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(checked = autoCopyTranscript, onCheckedChange = {
+                        autoCopyTranscript = it
+                        Prefs.setAutoCopyTranscript(context, it)
+                    })
+                }
                 Text("Auto prefers direct InputConnection through LSPosed and falls back to clipboard + root KEYCODE_PASTE.")
                 InputBackend.entries.forEach { option ->
                     Row {
@@ -368,6 +412,28 @@ private fun SettingsScreen(openHistory: Boolean) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Wispr authentication", style = MaterialTheme.typography.titleMedium)
                 Text(if (session != null) "Signed in as ${session?.email}" else "Not signed in")
+                Text("Saved accounts", style = MaterialTheme.typography.titleSmall)
+                Text("Select an account for new transcriptions. Each account has its own weekly allowance. Finish recording/processing before switching; an in-flight request will not be moved to another account.", style = MaterialTheme.typography.bodySmall)
+                accounts.forEach { account ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(
+                            selected = account.id == activeAccountId,
+                            enabled = !signingIn,
+                            onClick = {
+                                auth.selectAccount(account.id)
+                                reloadAccounts()
+                                email = session?.email.orEmpty()
+                                password = ""
+                                emailVerification = null
+                                verificationCode = ""
+                                status = "Switched to ${session?.email}"
+                            },
+                        )
+                        Text(account.session.email, Modifier.weight(1f))
+                        TextButton(enabled = !signingIn, onClick = { removeAccountId = account.id }) { Text("Remove") }
+                    }
+                }
+                Text("Add another account by signing in or importing its session below. Saved sessions stay private on this device.", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text("Email") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(
                     value = password,
@@ -379,21 +445,66 @@ private fun SettingsScreen(openHistory: Boolean) {
                 Button(
                     onClick = {
                         coroutine.launch {
+                            signingIn = true
+                            emailVerification = null
+                            verificationCode = ""
                             status = "Signing in…"
                             try {
                                 session = client.login(email.trim(), password)
+                                reloadAccounts()
                                 password = ""
                                 status = "Wispr session saved"
+                            } catch (challenge: WisprClient.EmailVerificationRequired) {
+                                password = ""
+                                emailVerification = challenge
+                                status = challenge.message.orEmpty()
                             } catch (t: Throwable) {
                                 status = "Login failed: ${t.message}"
+                            } finally {
+                                signingIn = false
                             }
                         }
                     },
-                    enabled = email.isNotBlank() && password.isNotBlank(),
-                ) { Text("Email login") }
+                    enabled = !signingIn && email.isNotBlank() && password.isNotBlank(),
+                ) { Text("Sign in / add account") }
+
+                emailVerification?.let { challenge ->
+                    Text("Enter the code sent to ${challenge.email}.")
+                    OutlinedTextField(
+                        value = verificationCode,
+                        onValueChange = { verificationCode = it },
+                        label = { Text("Email verification code") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Button(
+                        enabled = !signingIn && verificationCode.isNotBlank(),
+                        onClick = {
+                            coroutine.launch {
+                                signingIn = true
+                                status = "Verifying…"
+                                try {
+                                    session = client.verifyEmailOtp(challenge.email, challenge.pendingToken, verificationCode)
+                                    reloadAccounts()
+                                    emailVerification = null
+                                    verificationCode = ""
+                                    status = "Wispr session saved"
+                                } catch (next: WisprClient.EmailVerificationRequired) {
+                                    emailVerification = next
+                                    verificationCode = ""
+                                    status = next.message.orEmpty()
+                                } catch (t: Throwable) {
+                                    status = "Verification failed: ${t.message}. Try again or sign in for a new code."
+                                } finally {
+                                    signingIn = false
+                                }
+                            }
+                        },
+                    ) { Text("Verify email") }
+                }
 
                 Spacer(Modifier.height(4.dp))
-                Text("Or paste the existing ~/.config/wispr-linux/session.json from the dev machine:")
+                Text("Or import an existing Wispr session JSON (access_token, refresh_token, and optional provider/user_id):")
                 OutlinedTextField(
                     value = sessionJson,
                     onValueChange = { sessionJson = it },
@@ -405,20 +516,28 @@ private fun SettingsScreen(openHistory: Boolean) {
                     Button(onClick = {
                         try {
                             session = auth.importJson(sessionJson)
+                            reloadAccounts()
                             sessionJson = ""
+                            emailVerification = null
+                            verificationCode = ""
                             status = "Imported Wispr session"
                         } catch (t: Throwable) {
                             status = "Import failed: ${t.message}"
                         }
-                    }, enabled = sessionJson.isNotBlank()) { Text("Import session") }
-                    TextButton(onClick = {
+                    }, enabled = !signingIn && sessionJson.isNotBlank()) { Text("Import session") }
+                    TextButton(enabled = !signingIn, onClick = {
                         auth.clear()
-                        session = null
-                        status = "Wispr session cleared"
-                    }) { Text("Clear") }
+                        reloadAccounts()
+                        email = session?.email.orEmpty()
+                        emailVerification = null
+                        verificationCode = ""
+                        status = "Active saved account removed"
+                    }) { Text("Sign out active account") }
                 }
             }
         }
+
+        WisprUsageCard(session, client)
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(14.dp)) {

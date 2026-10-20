@@ -82,6 +82,8 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     debugImplementation(libs.compose.ui.tooling)
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver3:${libs.versions.okhttp.get()}")
+    testImplementation("org.json:json:20251224")
 }
 
 protobuf {

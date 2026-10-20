@@ -14,6 +14,8 @@ import io.grpc.stub.ClientCallStreamObserver
 import io.grpc.stub.ClientResponseObserver
 import io.grpc.stub.MetadataUtils
 import io.grpc.stub.StreamObserver
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CompletableDeferred
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -29,6 +31,8 @@ class WisprStreamingClient(
             Prefs.streamingApiKey(context.applicationContext) ?: BuildConfig.WISPR_BASETEN_API_KEY.trim()
         },
     )
+
+    private val endpoint = sharedEndpoint
 
     data class Result(
         val text: String,
@@ -48,10 +52,14 @@ class WisprStreamingClient(
             throw IllegalStateException("Wispr streaming credential is unavailable in this build")
         }
         Log.i(TAG, "requesting fresh Wispr access token")
-        val accessToken = wispr.freshAccessToken()
+        val session = wispr.freshStreamingSession()
+        val accessToken = session.accessToken
         Log.i(TAG, "fresh Wispr access token acquired length=${accessToken.length}")
+        val host = withContext(Dispatchers.IO) { endpoint.resolve() }
         return Session(
+            host = host,
             accessToken = accessToken,
+            userId = session.userId ?: AuthStore.jwtUserId(accessToken),
             apiKey = apiKey,
             modelId = modelId,
             onPartial = onPartial,
@@ -59,13 +67,15 @@ class WisprStreamingClient(
     }
 
     class Session internal constructor(
+        host: String,
         accessToken: String,
+        userId: String?,
         apiKey: String,
         private val modelId: String,
         private val onPartial: (String) -> Unit,
     ) {
         private val channel: ManagedChannel = OkHttpChannelBuilder
-            .forAddress("model-$modelId.grpc.api.baseten.co", 443)
+            .forAddress(host, 443)
             .useTransportSecurity()
             .build()
         private val result = CompletableDeferred<Result>()
@@ -74,18 +84,15 @@ class WisprStreamingClient(
 
         @Volatile private var requestCall: ClientCallStreamObserver<Request>? = null
         @Volatile private var requestObserver: StreamObserver<Request>? = null
-        @Volatile private var latestRawText: String? = null
-        @Volatile private var latestFormattedText: String? = null
-        @Volatile private var latestPlaintext: String = ""
-        @Volatile private var latestAudioDurationSeconds: Double? = null
-        @Volatile private var latestAudioReceivedSeconds: Float? = null
+        private val responses = WisprStreamingResponses(onPartial)
 
         init {
-            Log.i(TAG, "creating Baseten gRPC channel model=$modelId")
+            Log.i(TAG, "creating Wispr gRPC channel host=$host model=$modelId")
             val headers = Metadata().apply {
                 put(AUTHORIZATION, "Bearer $accessToken")
                 put(BASETEN_AUTHORIZATION, "Api-Key $apiKey")
                 put(BASETEN_MODEL_ID, "model-$modelId")
+                put(CLIENT_HEADER, WisprProtocol.CLIENT_HEADER)
             }
             val stub = TranscriptionServiceGrpc.newStub(channel)
                 .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers))
@@ -95,55 +102,30 @@ class WisprStreamingClient(
                 }
 
                 override fun onNext(response: Response) {
-                    if (response.hasHeartbeat()) {
-                        latestAudioReceivedSeconds = response.heartbeat.audioReceivedSeconds
-                    }
-                    if (response.hasState()) {
-                        val raw = response.state.takeIf { it.hasRawText() }
-                            ?.rawText?.content?.takeIf { it.isNotBlank() }
-                        val formatted = response.state.takeIf { it.hasFormattedText() }
-                            ?.formattedText?.content?.takeIf { it.isNotBlank() }
-                        if (raw != latestRawText || formatted != latestFormattedText) {
-                            latestRawText = raw
-                            latestFormattedText = formatted
-                            (formatted ?: raw)?.let(onPartial)
-                        }
-                    }
-                    if (response.hasResult()) {
-                        val output = response.result.output
-                        if (output.plaintext.isNotBlank()) latestPlaintext = output.plaintext
-                        if (response.result.hasAudioDuration()) {
-                            val duration = response.result.audioDuration
-                            latestAudioDurationSeconds = duration.seconds.toDouble() + duration.nanos.toDouble() / 1_000_000_000.0
-                        }
-                        if (output.plaintext.isNotBlank()) {
-                            Log.i(TAG, "Wispr final result received; completing without waiting for stream close")
-                            finishSuccessfully(output.plaintext)
-                        }
+                    if (terminal.get()) return
+                    try {
+                        responses.accept(response)?.let { finishSuccessfully(it) }
+                    } catch (t: IllegalStateException) {
+                        finishExceptionally(t)
                     }
                 }
 
                 override fun onError(t: Throwable) {
+                    if (terminal.get()) return
                     Log.e(TAG, "Wispr gRPC stream error: ${t.message}", t)
                     finishExceptionally(t)
                 }
 
                 override fun onCompleted() {
                     if (terminal.get()) return
-                    val text = latestPlaintext.ifBlank {
-                        latestFormattedText ?: latestRawText.orEmpty()
-                    }
-                    if (text.isBlank()) {
-                        finishExceptionally(IllegalStateException("Wispr streaming transcription returned no text"))
-                    } else {
-                        finishSuccessfully(text)
-                    }
+                    // A closed stream with only partial state is not a committed result.
+                    finishExceptionally(IllegalStateException("Wispr stream ended without a final result"))
                 }
             }
             Log.i(TAG, "starting TranscriptionService/TranscribeStream")
             requestObserver = stub.transcribeStream(responseObserver)
             Log.i(TAG, "gRPC stream observer created; sending init")
-            send(buildInitRequest())
+            send(buildInitRequest(accessToken, userId))
             Log.i(TAG, "init sent")
         }
 
@@ -187,18 +169,13 @@ class WisprStreamingClient(
             }
         }
 
-        private fun finishSuccessfully(text: String) {
+        private fun finishSuccessfully(value: Result) {
             if (!terminal.compareAndSet(false, true)) return
-            result.complete(
-                Result(
-                    text = text,
-                    rawText = latestRawText,
-                    formattedText = latestFormattedText,
-                    audioDurationSeconds = latestAudioDurationSeconds,
-                    audioReceivedSeconds = latestAudioReceivedSeconds,
-                ),
-            )
-            channel.shutdown()
+            result.complete(value)
+            // A final Result can arrive before the server half-closes. Do not leave
+            // an active RPC/channel behind after the caller considers capture done.
+            requestCall?.cancel("final result received", null)
+            channel.shutdownNow()
         }
 
         private fun finishExceptionally(t: Throwable) {
@@ -207,14 +184,27 @@ class WisprStreamingClient(
             channel.shutdownNow()
         }
 
-        private fun buildInitRequest(): Request {
+        companion object {
+            private val CLIENT_HEADER = Metadata.Key.of("x-wispr-client", Metadata.ASCII_STRING_MARSHALLER)
+            private val AUTHORIZATION = Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER)
+            private val BASETEN_AUTHORIZATION = Metadata.Key.of("baseten-authorization", Metadata.ASCII_STRING_MARSHALLER)
+            private val BASETEN_MODEL_ID = Metadata.Key.of("baseten-model-id", Metadata.ASCII_STRING_MARSHALLER)
+        }
+    }
+
+    companion object {
+        private const val TAG = "betterFlow/WisprStreaming"
+        const val DEFAULT_MODEL_ID = WisprProtocol.DEFAULT_MODEL_ID
+        private val sharedEndpoint = WisprStreamingEndpoint()
+
+        internal fun buildInitRequest(accessToken: String, userId: String? = null): Request {
             val transcriptionId = UUID.randomUUID().toString()
             return Request.newBuilder()
                 .setInit(
                     com.jadenjsj.betterflow.proto.Init.newBuilder()
                         .setMetadata(
                             com.jadenjsj.betterflow.proto.Metadata.newBuilder()
-                                .setUserId(UUID.randomUUID().toString())
+                                .setUserId(validUserId(userId ?: AuthStore.jwtUserId(accessToken) ?: AuthStore.jwtSubject(accessToken)))
                                 .setSessionId(transcriptionId)
                                 .setRequestId(transcriptionId)
                                 .setAudioEncoding(1)
@@ -225,9 +215,9 @@ class WisprStreamingClient(
                                         .setPlatform(4)
                                         .setVersion(
                                             com.jadenjsj.betterflow.proto.Version.newBuilder()
-                                                .setMajor(1)
+                                                .setMajor(2)
                                                 .setMinor(8)
-                                                .setPatch(8),
+                                                .setPatch(0),
                                         ),
                                 )
                                 .setDebug(false),
@@ -241,15 +231,8 @@ class WisprStreamingClient(
                 .build()
         }
 
-        companion object {
-            private val AUTHORIZATION = Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER)
-            private val BASETEN_AUTHORIZATION = Metadata.Key.of("baseten-authorization", Metadata.ASCII_STRING_MARSHALLER)
-            private val BASETEN_MODEL_ID = Metadata.Key.of("baseten-model-id", Metadata.ASCII_STRING_MARSHALLER)
-        }
-    }
-
-    companion object {
-        private const val TAG = "betterFlow/WisprStreaming"
-        const val DEFAULT_MODEL_ID = "v31pl413"
+        internal fun validUserId(subject: String?): String = runCatching {
+            UUID.fromString(subject).toString()
+        }.getOrDefault("00000000-0000-0000-0000-000000000000")
     }
 }

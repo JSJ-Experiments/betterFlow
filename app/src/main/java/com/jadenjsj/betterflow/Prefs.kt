@@ -51,6 +51,7 @@ object Prefs {
     private const val KEY_STREAMING_API_KEY = "streaming_api_key"
     private const val KEY_PRESERVE_PRE_TAP_AUDIO = "preserve_pre_tap_audio"
     private const val KEY_AUDIO_DRAIN_TIMEOUT_MS = "audio_drain_timeout_ms"
+    private const val KEY_AUTO_COPY = "auto_copy_transcript"
 
     private fun prefs(context: Context) = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
@@ -70,6 +71,13 @@ object Prefs {
 
     fun setBackend(context: Context, backend: InputBackend) {
         prefs(context).edit().putString(KEY_BACKEND, backend.wireName).apply()
+    }
+
+    fun autoCopyTranscript(context: Context): Boolean = prefs(context).getBoolean(KEY_AUTO_COPY, false)
+
+    fun setAutoCopyTranscript(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_AUTO_COPY, enabled).apply()
+        XposedRemoteAuthSync.syncFromLocal()
     }
 
     fun bubblePosition(context: Context): Pair<Int, Int> {

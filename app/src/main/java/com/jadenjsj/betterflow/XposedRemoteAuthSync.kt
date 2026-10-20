@@ -11,6 +11,9 @@ object XposedRemoteAuthSync {
     const val KEY_ACCESS = "access_token"
     const val KEY_REFRESH = "refresh_token"
     const val KEY_EXPIRES = "expires_at"
+    const val KEY_PROVIDER = "provider"
+    const val KEY_USER_ID = "user_id"
+    const val KEY_AUTO_COPY = "auto_copy_transcript"
     const val KEY_STREAMING_API_KEY = "streaming_api_key"
     const val KEY_GBOARD_MIC_ENABLED = "gboard_mic_enabled"
     const val KEY_LEGACY_TRANSCRIPTION = "legacy_transcription"
@@ -52,6 +55,9 @@ object XposedRemoteAuthSync {
                 .remove(KEY_ACCESS)
                 .remove(KEY_REFRESH)
                 .remove(KEY_EXPIRES)
+                .remove(KEY_PROVIDER)
+                .remove(KEY_USER_ID)
+                .remove(KEY_AUTO_COPY)
                 .remove(KEY_STREAMING_API_KEY)
                 .remove(KEY_GBOARD_MIC_ENABLED)
                 .remove(KEY_LEGACY_TRANSCRIPTION)
@@ -63,10 +69,15 @@ object XposedRemoteAuthSync {
                     .putString(KEY_ACCESS, session.accessToken)
                     .putLong(KEY_EXPIRES, session.expiresAt ?: AuthStore.jwtExpiresAt(session.accessToken) ?: 0L)
                 session.refreshToken?.let { edit.putString(KEY_REFRESH, it) }
+                (session.provider ?: AuthStore.jwtProvider(session.accessToken))?.let {
+                    edit.putString(KEY_PROVIDER, it.wireName)
+                }
+                session.userId?.let { edit.putString(KEY_USER_ID, it) }
             }
             appContext?.let { context ->
                 Prefs.streamingApiKey(context)?.let { edit.putString(KEY_STREAMING_API_KEY, it) }
                 edit.putBoolean(KEY_GBOARD_MIC_ENABLED, Prefs.gboardMicEnabled(context))
+                edit.putBoolean(KEY_AUTO_COPY, Prefs.autoCopyTranscript(context))
                 edit.putBoolean(KEY_LEGACY_TRANSCRIPTION, Prefs.legacyTranscription(context))
                 edit.putBoolean(KEY_PRESERVE_PRE_TAP_AUDIO, Prefs.preservePreTapAudio(context))
                 edit.putInt(KEY_AUDIO_DRAIN_TIMEOUT_MS, Prefs.audioDrainTimeoutMs(context))

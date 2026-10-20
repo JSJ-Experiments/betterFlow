@@ -2,6 +2,10 @@ package com.jadenjsj.betterflow
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.MediaPlayer
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -31,6 +35,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -49,9 +56,26 @@ fun HistoryScreen(onBack: () -> Unit) {
     var message by remember { mutableStateOf("") }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     var playingId by remember { mutableStateOf<String?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     suspend fun refresh() { entries = withContext(Dispatchers.IO) { store.list() } }
     LaunchedEffect(Unit) { refresh() }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) scope.launch { refresh() }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                scope.launch { refresh() }
+            }
+        }
+        context.registerReceiver(receiver, IntentFilter(HistoryBridge.ACTION_CHANGED), Context.RECEIVER_NOT_EXPORTED)
+        onDispose { context.unregisterReceiver(receiver) }
+    }
     DisposableEffect(Unit) {
         onDispose { player?.release() }
     }
@@ -77,6 +101,7 @@ fun HistoryScreen(onBack: () -> Unit) {
             }
         }
         Text("History", style = MaterialTheme.typography.headlineMedium)
+        TextButton(onClick = { scope.launch { refresh() } }) { Text("Refresh history") }
         Text("Lossless WAV + transcript and capture metadata stay on this device until you remove the app. Export includes dataset.jsonl. Retries only run when tapped.", style = MaterialTheme.typography.bodySmall)
         if (message.isNotBlank()) Text(message)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -111,14 +136,18 @@ fun HistoryScreen(onBack: () -> Unit) {
                                     busyId = entry.id
                                     val raw = JSONArray()
                                     try {
-                                        withContext(Dispatchers.IO) {
+                                        val text = withContext(Dispatchers.IO) {
                                             store.beginAttempt(entry.id)
                                             val text = client.transcribeLegacyPcm(store.pcm(entry.id)) { raw.put(it) }.trim()
                                             check(text.isNotEmpty()) { "Wispr returned empty text" }
                                             store.result(entry.id, text, "legacy_http_retry", raw.toString())
                                             HistoryNotifier.clear(context, entry.id)
+                                            text
                                         }
-                                        message = "Retry succeeded. Copy the text below."
+                                        message = if (Prefs.autoCopyTranscript(context)) {
+                                            if (TranscriptClipboard.copy(context, text)) "Retry succeeded. Transcript copied."
+                                            else "Retry succeeded. Auto-copy failed; use Copy text below."
+                                        } else "Retry succeeded. Copy the text below."
                                     } catch (t: Throwable) {
                                         withContext(Dispatchers.IO) { store.failure(entry.id, t.message ?: "Retry failed", raw.toString()) }
                                         message = "Retry failed: ${t.message}"

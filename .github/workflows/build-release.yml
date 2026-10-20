@@ -49,6 +49,9 @@ jobs:
       - name: Check event-driven power behavior
         run: ./tools/check-power-behavior.sh
 
+      - name: Test API compatibility and runtime helpers
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
       - name: Prepare signing key
         if: github.event_name != 'pull_request'
         env:

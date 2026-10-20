@@ -1,8 +1,6 @@
 package com.jadenjsj.betterflow.xposed
 
 import android.content.BroadcastReceiver
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -27,6 +25,8 @@ import com.jadenjsj.betterflow.BuildConfig
 import com.jadenjsj.betterflow.InputInjector
 import com.jadenjsj.betterflow.HookHistoryBridge
 import com.jadenjsj.betterflow.Prefs
+import com.jadenjsj.betterflow.TranscriptClipboard
+import com.jadenjsj.betterflow.WisprAuthProvider
 import com.jadenjsj.betterflow.WisprClient
 import com.jadenjsj.betterflow.WisprSession
 import com.jadenjsj.betterflow.WisprSessionStore
@@ -99,6 +99,7 @@ class BetterFlowXposedModule : XposedModule() {
                     Handler(service.mainLooper).postDelayed({
                         runCatching {
                             prepareHookConfig()
+                            retryPendingHookHistory(service)
                             locateGboardMic(service)
                         }.onFailure { moduleLog("$TAG Gboard mic discovery failed: ${it.message}", it) }
                     }, 350L)
@@ -128,7 +129,10 @@ class BetterFlowXposedModule : XposedModule() {
 
     private fun installReceiver(service: InputMethodService) {
         currentIme = WeakReference(service)
-        if (service.packageName == GBOARD_PACKAGE) prepareHookConfig()
+        if (service.packageName == GBOARD_PACKAGE) {
+            prepareHookConfig()
+            retryPendingHookHistory(service)
+        }
         synchronized(receivers) {
             if (receivers.containsKey(service)) return
             val receiver = object : BroadcastReceiver() {
@@ -406,16 +410,29 @@ class BetterFlowXposedModule : XposedModule() {
         val preservePreTapAudio: Boolean,
         val audioDrainTimeoutMs: Int,
         val history: HookHistoryBridge,
+        val autoCopyTranscript: Boolean,
     )
 
-    private class HookSessionStore(private val prefs: SharedPreferences) : WisprSessionStore {
+    private class HookSessionStore(private val prefs: SharedPreferences, private val history: HookHistoryBridge) : WisprSessionStore {
+        private val initialSession = remoteSession()
         @Volatile private var refreshedInMemory: WisprSession? = null
 
         override fun load(): WisprSession? {
-            val remote = remoteSession()
+            val remote = remoteSession() ?: run {
+                refreshedInMemory = null
+                return null
+            }
+            val initial = initialSession
+            check(initial == null || (remote.email == initial.email && remote.provider == initial.provider && remote.userId == initial.userId)) {
+                refreshedInMemory = null
+                "Active Wispr account changed; start a new recording"
+            }
             val memory = refreshedInMemory
             if (memory == null) return remote
-            if (remote == null) return memory
+            if (memory.email != remote.email || memory.provider != remote.provider || memory.userId != remote.userId) {
+                refreshedInMemory = null
+                return remote
+            }
             val memoryExpiry = memory.expiresAt ?: AuthStore.jwtExpiresAt(memory.accessToken) ?: 0L
             val remoteExpiry = remote.expiresAt ?: AuthStore.jwtExpiresAt(remote.accessToken) ?: 0L
             return if (memoryExpiry >= remoteExpiry) memory else remote
@@ -427,6 +444,16 @@ class BetterFlowXposedModule : XposedModule() {
             refreshedInMemory = session
         }
 
+        override fun refresh(rejectedAccessToken: String?): WisprSession {
+            // Refresh-token rotation has exactly one persistent owner, the companion app.
+            val remote = remoteSession() ?: error("Wispr is signed out; open betterFlow")
+            val expected = initialSession ?: error("Wispr is signed out; open betterFlow")
+            check(remote.email == expected.email && remote.provider == expected.provider && remote.userId == expected.userId) {
+                "Active Wispr account changed; start a new recording"
+            }
+            return history.refreshSession(rejectedAccessToken, expected).also { refreshedInMemory = it }
+        }
+
         private fun remoteSession(): WisprSession? {
             val access = prefs.getString(REMOTE_KEY_ACCESS, null)?.takeIf { it.isNotBlank() } ?: return null
             return WisprSession(
@@ -435,6 +462,10 @@ class BetterFlowXposedModule : XposedModule() {
                 refreshToken = prefs.getString(REMOTE_KEY_REFRESH, null)?.takeIf { it.isNotBlank() },
                 expiresAt = prefs.getLong(REMOTE_KEY_EXPIRES, 0L).takeIf { it > 0L }
                     ?: AuthStore.jwtExpiresAt(access),
+                provider = WisprAuthProvider.fromWireName(prefs.getString(REMOTE_KEY_PROVIDER, null))
+                    ?: AuthStore.jwtProvider(access),
+                userId = prefs.getString(REMOTE_KEY_USER_ID, null)?.takeIf { it.isNotBlank() }
+                    ?: AuthStore.jwtUserId(access),
             )
         }
     }
@@ -451,10 +482,21 @@ class BetterFlowXposedModule : XposedModule() {
         moduleLog("$TAG remote config loaded gboardMicEnabled=$gboardMicEnabled")
     }
 
+    private fun retryPendingHookHistory(service: InputMethodService) {
+        val prefs = remoteHookPreferences() ?: return
+        val token = prefs.getString(REMOTE_KEY_HISTORY_TOKEN, null)?.takeIf { it.isNotBlank() } ?: return
+        HookHistoryBridge(service, token).retryPending()
+    }
+
     private fun createHookClients(): HookClients {
         val prefs = remoteHookPreferences()
             ?: error("LSPosed remote settings are unavailable; open betterFlow once")
-        val store = HookSessionStore(prefs)
+        val history = HookHistoryBridge(
+            requireNotNull(currentIme?.get()) { "Gboard service unavailable" },
+            prefs.getString(REMOTE_KEY_HISTORY_TOKEN, null)
+                ?: error("History bridge is not synced; open betterFlow once"),
+        )
+        val store = HookSessionStore(prefs, history)
         check(store.load() != null) { "Wispr session is not synced; open betterFlow once" }
         val wispr = WisprClient(store)
         val remoteKey = prefs.getString(REMOTE_KEY_STREAMING_API_KEY, null)?.trim().orEmpty()
@@ -468,11 +510,8 @@ class BetterFlowXposedModule : XposedModule() {
                 REMOTE_KEY_AUDIO_DRAIN_TIMEOUT_MS,
                 Prefs.DEFAULT_AUDIO_DRAIN_TIMEOUT_MS,
             ).coerceIn(Prefs.MIN_AUDIO_DRAIN_TIMEOUT_MS, Prefs.MAX_AUDIO_DRAIN_TIMEOUT_MS),
-            history = HookHistoryBridge(
-                requireNotNull(currentIme?.get()) { "Gboard service unavailable" },
-                prefs.getString(REMOTE_KEY_HISTORY_TOKEN, null)
-                    ?: error("History bridge is not synced; open betterFlow once"),
-            ),
+            history = history,
+            autoCopyTranscript = prefs.getBoolean(REMOTE_KEY_AUTO_COPY_TRANSCRIPT, false),
         )
     }
 
@@ -582,7 +621,7 @@ class BetterFlowXposedModule : XposedModule() {
                 historyId = runCatching { clients.history.save(pcm) }
                     .onFailure { moduleLog("$TAG could not archive Gboard audio: ${it.message}", it) }
                     .getOrNull()
-                historyId?.let { moduleLog("$TAG Gboard audio archived id=$it bytes=${pcm.size}") }
+                historyId?.let { moduleLog("$TAG Gboard audio staged for History id=$it bytes=${pcm.size}") }
                 historyId?.let { id -> runCatching { clients.history.attempt(id) } }
                 text = if (clients.legacyOnly) {
                     engine = "legacy_http"
@@ -610,7 +649,7 @@ class BetterFlowXposedModule : XposedModule() {
                 historyId?.let { id -> runCatching { clients.history.failure(id, t.message ?: t.javaClass.simpleName, rawResponses.toString()) } }
             }
             Handler(service.mainLooper).post {
-                finishHookVoice(service, generation, text, error, historyId, clients.history)
+                finishHookVoice(service, generation, text, error, historyId, clients.history, clients.autoCopyTranscript)
             }
         }, "betterflow-gboard-transcribe").start()
     }
@@ -646,25 +685,36 @@ class BetterFlowXposedModule : XposedModule() {
         error: Throwable?,
         historyId: String?,
         history: HookHistoryBridge,
+        autoCopyTranscript: Boolean,
     ) {
-        if (hookOperationGeneration != generation) return
+        if (hookOperationGeneration != generation) {
+            // A destroyed/replaced IME must not strand the completed transcript's outbox state.
+            historyId?.let { id -> Thread({ runCatching { history.insertion(id, "failed_cancelled") } },
+                "betterflow-history-cancelled").start() }
+            return
+        }
         if (error != null) {
             moduleLog("$TAG in-process transcription failed: ${error.message}", error)
             android.widget.Toast.makeText(service, "betterFlow failed: ${error.message}", android.widget.Toast.LENGTH_LONG).show()
         } else if (!text.isNullOrBlank()) {
+            val copied = autoCopyTranscript && TranscriptClipboard.copy(service, text)
+            if (autoCopyTranscript && !copied) android.widget.Toast.makeText(service,
+                "betterFlow: automatic clipboard copy failed; transcript remains in History",
+                android.widget.Toast.LENGTH_LONG).show()
             val connection = service.currentInputConnection
             val ok = runCatching { connection != null && connection.commitText(text, 1) }.getOrDefault(false)
             if (ok) {
                 moduleLog("$TAG in-process transcription committed through Gboard InputConnection (${text.length} chars)")
             } else {
                 moduleLog("$TAG transcription ready but Gboard InputConnection is unavailable")
-                runCatching {
-                    service.getSystemService(ClipboardManager::class.java)
-                        .setPrimaryClip(ClipData.newPlainText("betterFlow transcript", text))
-                }
+                val fallbackCopied = copied || TranscriptClipboard.copy(service, text)
                 android.widget.Toast.makeText(service,
-                    if (historyId != null) "betterFlow: text copied and saved in History" else "betterFlow: text copied; History unavailable",
-                    android.widget.Toast.LENGTH_LONG).show()
+                    when {
+                        fallbackCopied && historyId != null -> "betterFlow: text copied; History sync queued"
+                        fallbackCopied -> "betterFlow: text copied; History unavailable"
+                        historyId != null -> "betterFlow: insertion/copy failed; open History after sync"
+                        else -> "betterFlow: insertion and clipboard copy failed"
+                    }, android.widget.Toast.LENGTH_LONG).show()
             }
             if (ok && historyId == null) android.widget.Toast.makeText(service,
                 "betterFlow: text inserted but History was unavailable", android.widget.Toast.LENGTH_LONG).show()
@@ -774,6 +824,9 @@ class BetterFlowXposedModule : XposedModule() {
         private const val TAG = "betterFlow/Xposed"
         private const val GBOARD_PACKAGE = "com.google.android.inputmethod.latin"
         private const val REMOTE_AUTH_GROUP = "betterflow_auth"
+        private const val REMOTE_KEY_PROVIDER = "provider"
+        private const val REMOTE_KEY_USER_ID = "user_id"
+        private const val REMOTE_KEY_AUTO_COPY_TRANSCRIPT = "auto_copy_transcript"
         private const val REMOTE_KEY_EMAIL = "email"
         private const val REMOTE_KEY_ACCESS = "access_token"
         private const val REMOTE_KEY_REFRESH = "refresh_token"
