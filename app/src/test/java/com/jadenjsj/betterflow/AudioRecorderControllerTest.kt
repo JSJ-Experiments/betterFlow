@@ -135,6 +135,7 @@ class AudioRecorderControllerTest {
     @Test fun preTapDrainKeepsCutoffAndReleasesAfterLoopStopsItself() {
         val allowRead = CountDownLatch(1)
         val cutoff = System.nanoTime()
+        lateinit var tailRecorder: AudioRecorderController
         val draining = Input().apply {
             timestampAction = {
                 allowRead.countDown()
@@ -142,11 +143,15 @@ class AudioRecorderControllerTest {
             }
             readAction = { bytes, offset, size ->
                 check(allowRead.await(5, TimeUnit.SECONDS))
+                // timestamp() runs while stop owns the controller monitor.
+                // Wait until it publishes the cutoff, not merely until it starts
+                // estimating it; otherwise this fixture races pre-stop delivery.
+                synchronized(tailRecorder) { }
                 bytes.fill(7, offset, offset + size)
                 size
             }
         }
-        val tailRecorder = AudioRecorderController { draining }
+        tailRecorder = AudioRecorderController { draining }
         tailRecorder.start(chunkBytes = 8)
         assertTrue(draining.enteredRead.await(5, TimeUnit.SECONDS))
         assertArrayEquals(byteArrayOf(7, 7, 7, 7), tailRecorder.stopAndGetPcm(
