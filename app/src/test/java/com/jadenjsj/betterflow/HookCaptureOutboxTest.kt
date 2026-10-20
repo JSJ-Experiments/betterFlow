@@ -3,6 +3,7 @@ package com.jadenjsj.betterflow
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Rule
 import org.junit.Test
@@ -11,6 +12,29 @@ import java.io.File
 
 class HookCaptureOutboxTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun emptyFastPathHandlesMissingRootAndFinalAcknowledgement() {
+        val outbox = HookCaptureOutbox(File(temporary.newFolder(), "outbox"))
+        assertFalse(outbox.hasEntries())
+        val id = outbox.create(byteArrayOf(1, 2))
+        assertTrue(outbox.hasEntries())
+        assertTrue(outbox.contains(id))
+        outbox.remove(id)
+        assertFalse(outbox.hasEntries())
+        assertFalse(outbox.contains(id))
+    }
+
+    @Test fun entryLookupDoesNotReadOrRecoverUnrelatedMetadata() {
+        val root = temporary.newFolder()
+        val outbox = HookCaptureOutbox(root)
+        val id = outbox.create(byteArrayOf(1, 2))
+        val unrelated = outbox.create(byteArrayOf(3, 4))
+        val stateFile = File(File(root, unrelated), "state.json")
+        stateFile.writeText("incomplete metadata")
+        assertTrue(outbox.contains(id))
+        assertEquals("incomplete metadata", stateFile.readText())
+        assertEquals(0L, outbox.state(id).getLong("revision"))
+    }
 
     @Test fun captureAndTranscriptSurviveBridgeOrKeyboardRestart() {
         val root = temporary.newFolder()

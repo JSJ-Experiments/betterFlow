@@ -13,6 +13,9 @@ done
 if grep -q 'android.permission.WAKE_LOCK' app/src/main/AndroidManifest.xml; then
   fail "the APK must not request WAKE_LOCK"
 fi
+if grep -R -q -E 'newWakeLock\(|PeriodicWorkRequest|enqueueUniquePeriodicWork\(|setRepeating\(|setInexactRepeating\(|scheduleAtFixedRate\(|scheduleWithFixedDelay\(' app/src/main/java; then
+  fail "runtime work must stay event-driven, without wake locks or repeating jobs/timers"
+fi
 if grep -Eq '^[[:space:]]*service[[:space:]]+betterflow_watchdog' module/initrc/betterflow.rc; then
   fail "the module must not install a persistent watchdog service"
 fi

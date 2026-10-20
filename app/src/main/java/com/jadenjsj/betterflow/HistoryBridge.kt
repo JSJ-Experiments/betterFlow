@@ -260,6 +260,9 @@ class HookHistoryBridge(private val context: Context, private val token: String)
 
     /** Called by keyboard events or an explicit companion refresh, never by a timer. */
     fun retryPending(onComplete: ((Int) -> Unit)? = null) {
+        // Empty keyboard events need no executor. Explicit refresh still goes
+        // through the serial acknowledgement barrier, including an empty outbox.
+        if (onComplete == null && synchronized(outboxLock) { !outbox.hasEntries() }) return
         val acknowledge: (() -> Unit)? = onComplete?.let { callback ->
             {
                 val remaining = runCatching { synchronized(outboxLock) { outbox.ids().size } }.getOrDefault(-1)
@@ -283,7 +286,7 @@ class HookHistoryBridge(private val context: Context, private val token: String)
     private fun sync(id: String) {
         // Snapshot under the short local lock; IPC must not block transcription/state writes.
         val state = synchronized(outboxLock) {
-            if (id !in outbox.ids()) return
+            if (!outbox.contains(id)) return
             outbox.state(id)
         }
         val audio = outbox.audio(id)

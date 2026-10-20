@@ -10,9 +10,11 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
-class AudioRecorderController {
+class AudioRecorderController internal constructor(private val createInput: () -> PcmInput) {
+    constructor() : this({ AndroidPcmInput() })
+
     private val recording = AtomicBoolean(false)
-    private var audioRecord: AudioRecord? = null
+    private var audioRecord: PcmInput? = null
     private var worker: Thread? = null
     private var pcm = ByteArrayOutputStream()
     @Volatile private var stopping = false
@@ -22,44 +24,33 @@ class AudioRecorderController {
 
     @Synchronized
     fun start(onPcmChunk: ((ByteArray) -> Unit)? = null, chunkBytes: Int = STREAM_CHUNK_BYTES) {
-        if (recording.get() || stopping) return
+        if (recording.get() || stopping || worker?.isAlive == true) return
         require(chunkBytes > 0) { "chunkBytes must be > 0" }
-        val minBuffer = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-        )
-        val bufferSize = maxOf(minBuffer, STREAM_CHUNK_BYTES * 2)
-        val record = AudioRecord.Builder()
-            .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(SAMPLE_RATE)
-                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                    .build(),
-            )
-            .setBufferSizeInBytes(bufferSize)
-            .build()
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
-            record.release()
-            throw IllegalStateException("AudioRecord failed to initialize")
-        }
+        val record = createInput()
         pcm = ByteArrayOutputStream()
         audioRecord = record
         cutoffFrameExclusive = NO_CUTOFF_FRAME
         deliveredFrames = 0L
-        recording.set(true)
-        record.startRecording()
-        startedAtNanos = System.nanoTime()
-        worker = Thread(
-            { captureLoop(record, chunkBytes, onPcmChunk) },
-            "betterflow-audio",
-        ).also { it.start() }
+        try {
+            record.start()
+            startedAtNanos = System.nanoTime()
+            recording.set(true)
+            worker = Thread(
+                { captureLoop(record, chunkBytes, onPcmChunk) },
+                "betterflow-audio",
+            ).also { it.start() }
+        } catch (t: Throwable) {
+            recording.set(false)
+            audioRecord = null
+            worker = null
+            runCatching { record.stop() }
+            runCatching { record.release() }
+            throw t
+        }
     }
 
     private fun captureLoop(
-        record: AudioRecord,
+        record: PcmInput,
         chunkBytes: Int,
         onPcmChunk: ((ByteArray) -> Unit)?,
     ) {
@@ -68,13 +59,10 @@ class AudioRecorderController {
         var capturedFrames = 0L
         try {
             while (recording.get()) {
-                val count = record.read(
-                    chunk,
-                    filled,
-                    chunk.size - filled,
-                    AudioRecord.READ_BLOCKING,
-                )
-                if (count <= 0) continue
+                val count = record.read(chunk, filled, chunk.size - filled)
+                // A blocking read returning no data/error must not become a hot
+                // retry loop (e.g. a dead audio server or revoked permission).
+                if (count <= 0) break
                 val cutoff = cutoffFrameExclusive
                 val acceptedCount = if (cutoff == NO_CUTOFF_FRAME) {
                     count
@@ -89,15 +77,21 @@ class AudioRecorderController {
                     deliveredFrames = capturedFrames
                 }
                 if (filled == chunk.size) {
-                    onPcmChunk?.invoke(chunk.copyOf())
                     filled = 0
+                    onPcmChunk?.invoke(chunk.copyOf())
                 }
                 if (cutoff != NO_CUTOFF_FRAME && capturedFrames >= cutoff) {
                     recording.set(false)
                 }
             }
         } finally {
-            if (filled > 0) onPcmChunk?.invoke(chunk.copyOf(filled))
+            try {
+                if (filled > 0) onPcmChunk?.invoke(chunk.copyOf(filled))
+            } finally {
+                // Also release the microphone on read/callback failure. An
+                // explicit stop may already own cleanup; never stop a new input.
+                stopInternal(false, 0, System.nanoTime(), expectedInput = record, includePcm = false)
+            }
         }
     }
 
@@ -117,17 +111,23 @@ class AudioRecorderController {
         preservePreTapTail: Boolean,
         drainTimeoutMs: Int,
         cutoffNanos: Long,
+        expectedInput: PcmInput? = null,
+        includePcm: Boolean = true,
     ): StopResult {
-        val record: AudioRecord
+        // Worker cleanup/cancellation must not copy an entire recording just to
+        // discard the result. Call only while holding this controller's monitor.
+        fun snapshot(owned: Boolean) = StopResult(if (includePcm) pcm.toByteArray() else ByteArray(0), owned)
+        val record: PcmInput
         val captureWorker: Thread?
         synchronized(this) {
-            if (!recording.get()) return StopResult(pcm.toByteArray(), ownedRecorder = false)
-            record = audioRecord ?: return StopResult(pcm.toByteArray(), ownedRecorder = false)
+            record = audioRecord ?: return snapshot(false)
+            if (expectedInput != null && record !== expectedInput) {
+                return snapshot(false)
+            }
             captureWorker = worker
             // Claim this AudioRecord before waiting for the tail. Cancellation or
             // destruction may call stop again while the first caller is draining.
             audioRecord = null
-            worker = null
             stopping = true
             if (preservePreTapTail && drainTimeoutMs > 0) {
                 cutoffFrameExclusive = estimateCutoffFrame(record, cutoffNanos)
@@ -149,24 +149,21 @@ class AudioRecorderController {
             record.stop()
         } catch (_: Throwable) {
         }
-        runCatching { captureWorker?.join(1200) }
+        if (captureWorker !== Thread.currentThread()) runCatching { captureWorker?.join(1200) }
         runCatching { record.release() }
 
         synchronized(this) {
             stopping = false
-            return StopResult(pcm.toByteArray(), ownedRecorder = true)
+            return snapshot(true)
         }
     }
 
     private data class StopResult(val pcm: ByteArray, val ownedRecorder: Boolean)
 
-    private fun estimateCutoffFrame(record: AudioRecord, cutoffNanos: Long): Long {
+    private fun estimateCutoffFrame(record: PcmInput, cutoffNanos: Long): Long {
         val elapsedCutoffFrame = nanosToFrames((cutoffNanos - startedAtNanos).coerceAtLeast(0L))
-        val timestamp = AudioTimestamp()
-        val status = runCatching {
-            record.getTimestamp(timestamp, AudioTimestamp.TIMEBASE_MONOTONIC)
-        }.getOrDefault(AudioRecord.ERROR_INVALID_OPERATION)
-        if (status == AudioRecord.SUCCESS && timestamp.nanoTime > 0L) {
+        val timestamp = runCatching { record.timestamp() }.getOrNull()
+        if (timestamp != null && timestamp.nanoTime > 0L) {
             val elapsedNanos = (cutoffNanos - timestamp.nanoTime).coerceAtLeast(0L)
             val timestampCutoffFrame = timestamp.framePosition + nanosToFrames(elapsedNanos)
             // Reject devices whose frame counter does not reset for this AudioRecord.
@@ -191,11 +188,56 @@ class AudioRecorderController {
             preservePreTapTail = false,
             drainTimeoutMs = 0,
             cutoffNanos = System.nanoTime(),
+            includePcm = false,
         )
         if (result.ownedRecorder) synchronized(this) { pcm = ByteArrayOutputStream() }
     }
 
     fun isRecording(): Boolean = recording.get()
+
+    /** Small input boundary lets JVM tests exercise failure/stop resource ownership. */
+    internal interface PcmInput {
+        fun start()
+        fun read(buffer: ByteArray, offset: Int, size: Int): Int
+        fun stop()
+        fun release()
+        fun timestamp(): FrameTimestamp? = null
+    }
+
+    internal data class FrameTimestamp(val framePosition: Long, val nanoTime: Long)
+
+    private class AndroidPcmInput : PcmInput {
+        private val record = AudioRecord.Builder()
+            .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+            .setAudioFormat(AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_IN_MONO).build())
+            .setBufferSizeInBytes(maxOf(AudioRecord.getMinBufferSize(
+                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+            ), STREAM_CHUNK_BYTES * 2))
+            .build().also {
+                if (it.state != AudioRecord.STATE_INITIALIZED) {
+                    it.release()
+                    error("AudioRecord failed to initialize")
+                }
+            }
+
+        override fun start() {
+            record.startRecording()
+            check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "AudioRecord failed to start" }
+        }
+        override fun read(buffer: ByteArray, offset: Int, size: Int): Int =
+            record.read(buffer, offset, size, AudioRecord.READ_BLOCKING)
+        override fun stop() = record.stop()
+        override fun release() = record.release()
+        override fun timestamp(): FrameTimestamp? {
+            val stamp = AudioTimestamp()
+            return if (record.getTimestamp(stamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS) {
+                FrameTimestamp(stamp.framePosition, stamp.nanoTime)
+            } else null
+        }
+    }
 
     companion object {
         const val SAMPLE_RATE = 16_000

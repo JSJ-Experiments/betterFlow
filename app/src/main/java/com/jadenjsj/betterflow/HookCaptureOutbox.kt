@@ -8,6 +8,15 @@ import java.util.UUID
 
 /** Durable Gboard-private staging, retained until the companion acknowledges the final state. */
 internal class HookCaptureOutbox(private val root: File) {
+    // No metadata parsing, recovery writes, or worker startup for an empty outbox.
+    fun hasEntries(): Boolean = root.list()?.isNotEmpty() == true
+
+    // ids() already performs crash recovery once per drain. A per-entry lookup
+    // must not rescan/reparse every other recording in a pending backlog.
+    fun contains(id: String): Boolean = directory(id).let {
+        File(it, AUDIO).isFile && File(it, STATE).isFile
+    }
+
     fun create(pcm: ByteArray): String {
         val id = UUID.randomUUID().toString()
         val dir = directory(id).apply { check(mkdirs()) { "Could not stage recording" } }

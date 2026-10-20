@@ -34,6 +34,15 @@ Gboard completed captures use a durable, acknowledged outbox. Failed handoffs re
 
 History retries and exports are manual: there is no periodic sync, background retry loop, or idle audio work. Captures live in app-private storage and survive app updates, but not uninstall/data clearing; export a ZIP before either. Audio and transcripts may be sensitive, so the ZIP should be handled accordingly. If automatic insertion fails, betterFlow copies the transcript to the clipboard and keeps it in History. Failed transcription/insertion can also raise a tap-to-open History notification when notification permission is granted.
 
+## Battery behavior
+
+- No wake-lock permission, repeating jobs/alarms, background sync timer or updater polling. Usage refresh happens on app events/manual refresh; browser sign-in polling exists only during an explicit, cancellable attempt (maximum three minutes).
+- An empty Gboard history outbox does not start a sync worker on keyboard events. Pending recordings are scanned once per drain rather than once again for every entry; durable writes and acknowledged delivery are preserved. Idle history worker threads expire after 20 seconds.
+- The microphone uses blocking reads only while recording. Empty/failed reads stop the capture instead of retrying in a CPU loop; start/read/callback failures release the microphone. Stopping still preserves the configured pre-tap audio tail.
+- The optional floating bubble retains its foreground service while enabled; disabling it is not required for Gboard integration. Transcription and network work still consume power while in use.
+
+On-device spot check (Android 16, 2026-10-20): after a completed Gboard capture, neither betterFlow nor Gboard accumulated CPU ticks during a 15-second idle sample; neither held an active wake lock, and the microphone had stopped. This is an idle sanity check, not a long-term battery-life measurement or a guarantee about Gboard's own unrelated behavior. CI checks power-policy invariants and regression-tests recorder cleanup/error reads.
+
 ## CI
 
 Android builds happen only in GitHub Actions on a Blacksmith runner. The development server is used for source editing, not Gradle compilation.
