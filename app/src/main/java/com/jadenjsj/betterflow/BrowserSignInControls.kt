@@ -6,10 +6,12 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.CancellationException
@@ -28,6 +30,18 @@ fun BrowserSignInControls(
     val scope = rememberCoroutineScope()
     var attempt by remember { mutableStateOf<WisprBrowserAuth.Attempt?>(null) }
     var job by remember { mutableStateOf<Job?>(null) }
+    val changeBusy by rememberUpdatedState(onBusyChanged)
+
+    DisposableEffect(Unit) {
+        onDispose {
+            // Also handles navigating away before the launched job starts (no finally yet).
+            if (attempt != null) {
+                attempt = null
+                job?.cancel()
+                changeBusy(false)
+            }
+        }
+    }
 
     fun openBrowser(value: WisprBrowserAuth.Attempt) {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(value.loginUrl)).addCategory(Intent.CATEGORY_BROWSABLE))
