@@ -205,7 +205,10 @@ class WisprClientTest {
         server.enqueue(MockResponse(body = "not-json-sensitive"))
         val malformed = failure { client().transcribe(byteArrayOf(1)) }
         assertEquals("Wispr returned an invalid JSON response (HTTP 200)", malformed.message)
-        assertNull(malformed.cause)
+        // Coroutine debug recovery may add the original sanitized exception as a cause.
+        // The safety contract is that neither the parser exception nor its raw body escapes.
+        assertFalse(generateSequence(malformed) { it.cause }.any { it is org.json.JSONException })
+        assertFalse(malformed.stackTraceToString().contains("not-json-sensitive"))
         server.enqueue(response(JSONObject().put("text", JSONObject.NULL).put("secret", "sensitive")))
         assertEquals("Wispr returned no text", failure { client().transcribe(byteArrayOf(1)) }.message)
     }
