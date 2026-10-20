@@ -6,6 +6,13 @@ VERSION_CODE=${BETTERFLOW_VERSION_CODE:?BETTERFLOW_VERSION_CODE is required}
 APK=${APK_PATH:-app/build/outputs/apk/release/app-release.apk}
 OUT=${OUT_DIR:-release/generated}
 REPO=${GITHUB_REPOSITORY:-JSJ-Experiments/betterFlow}
+if [ -n "${GITHUB_RUN_NUMBER:-}" ]; then
+  DOWNLOAD_BASE="https://github.com/${REPO}/releases/download/build-${GITHUB_RUN_NUMBER}"
+  CHANGELOG="https://github.com/${REPO}/releases/tag/build-${GITHUB_RUN_NUMBER}"
+else
+  DOWNLOAD_BASE="https://github.com/${REPO}/releases/latest/download"
+  CHANGELOG="https://github.com/${REPO}/releases/latest"
+fi
 
 rm -rf "$OUT"
 mkdir -p "$OUT/module/payload" "$OUT/runtime/app" "$OUT/runtime/module-runtime/scripts" "$OUT/runtime/module-runtime/webroot"
@@ -49,15 +56,15 @@ MODULE_SHA=$(sha256sum "$OUT/betterflow-module.zip" | awk '{print $1}')
 cat > "$OUT/runtime.env" <<ENV
 version=${VERSION_NAME}
 versionCode=${VERSION_CODE}
-zipUrl=https://github.com/${REPO}/releases/latest/download/betterflow-runtime.zip
+zipUrl=${DOWNLOAD_BASE}/betterflow-runtime.zip
 sha256=${RUNTIME_SHA}
 ENV
 cat > "$OUT/update.json" <<JSON
 {
   "version": "${VERSION_NAME}",
   "versionCode": ${VERSION_CODE},
-  "zipUrl": "https://github.com/${REPO}/releases/latest/download/betterflow-module.zip",
-  "changelog": "https://github.com/${REPO}/releases/latest"
+  "zipUrl": "${DOWNLOAD_BASE}/betterflow-module.zip",
+  "changelog": "${CHANGELOG}"
 }
 JSON
 cat > "$OUT/checksums.txt" <<SUMS

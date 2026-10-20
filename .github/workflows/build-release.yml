@@ -52,7 +52,9 @@ jobs:
           npm run build
 
       - name: Check event-driven power behavior
-        run: ./tools/check-power-behavior.sh
+        run: |
+          ./tools/check-power-behavior.sh
+          bash ./tools/test-package-release.sh
 
       - name: Test API compatibility and runtime helpers
         run: ./gradlew --no-daemon :app:testDebugUnitTest

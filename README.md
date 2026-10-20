@@ -41,6 +41,7 @@ Android builds happen only in GitHub Actions on a Blacksmith runner. The develop
 Release signing is supplied through repository secrets. User Wispr access/refresh tokens are never committed or embedded in release artifacts.
 
 Manual CI builds publish APK/module/runtime assets to GitHub Releases by default (`publish_release` can be disabled). Feature-branch builds are prereleases; main builds remain the stable latest release, so an experimental branch does not silently replace users' stable updater target.
+Generated manifests pin their download URLs to the exact build tag, including prereleases, rather than accidentally mixing a new manifest/hash with an older stable bundle.
 
 ## Development status
 
