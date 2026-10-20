@@ -86,6 +86,12 @@ dependencies {
     testImplementation("org.json:json:20251224")
 }
 
+tasks.withType<Test>().configureEach {
+    testLogging {
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
 protobuf {
     protoc {
         artifact = "com.google.protobuf:protoc:4.36.1"

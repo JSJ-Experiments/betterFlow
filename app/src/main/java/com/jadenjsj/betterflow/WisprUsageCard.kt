@@ -35,8 +35,8 @@ fun WisprUsageCard(session: WisprSession?, client: WisprClient) {
     var usage by remember(session?.email, session?.userId) { mutableStateOf<WisprUsage?>(null) }
     var error by remember(session?.email, session?.userId) { mutableStateOf<String?>(null) }
     var checkedAt by remember(session?.email, session?.userId) { mutableStateOf<Long?>(null) }
-    var loading by remember { mutableStateOf(false) }
-    var refreshJob by remember { mutableStateOf<Job?>(null) }
+    var loading by remember(session?.email, session?.userId) { mutableStateOf(false) }
+    var refreshJob by remember(session?.email, session?.userId) { mutableStateOf<Job?>(null) }
 
     fun refresh() {
         if (session == null || loading) return
@@ -56,7 +56,8 @@ fun WisprUsageCard(session: WisprSession?, client: WisprClient) {
         }
     }
 
-    DisposableEffect(owner, session?.accessToken) {
+    // Token renewal does not change account identity or restart a running usage request.
+    DisposableEffect(owner, session?.email, session?.userId) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) refresh()
         }

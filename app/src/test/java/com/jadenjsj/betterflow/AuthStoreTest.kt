@@ -56,6 +56,28 @@ class AuthStoreTest {
     }
 
     @Test
+    fun workosProviderIdentityCannotShadowCanonicalWisprIdentity() {
+        val canonicalId = "32dde0dc-1b75-4d3b-bfe3-88ba148257e4"
+        val access = testJwt(extra = JSONObject().put("urn:wispr:user_external_id", canonicalId))
+        val session = AuthStore.sessionFromJson(JSONObject().put("access_token", access)
+            .put("user_id", "user_stale_provider_id")
+            .put("user", JSONObject().put("id", "user_workos")))
+        assertEquals(canonicalId, session.userId)
+        val noCanonicalClaim = AuthStore.sessionFromJson(JSONObject().put("access_token", testJwt())
+            .put("user", JSONObject().put("id", "user_workos")))
+        assertNull(noCanonicalClaim.userId)
+    }
+
+    @Test
+    fun supabaseUserObjectRetainsCanonicalIdentity() {
+        val canonicalId = "32dde0dc-1b75-4d3b-bfe3-88ba148257e4"
+        val session = AuthStore.sessionFromJson(JSONObject()
+            .put("access_token", testJwt("https://dodjkfqhwrzqjwkfnthl.supabase.co/auth/v1"))
+            .put("user", JSONObject().put("id", canonicalId)))
+        assertEquals(canonicalId, session.userId)
+    }
+
+    @Test
     fun unknownIssuerIsNotAssumedToBeSupabase() {
         assertNull(AuthStore.jwtProvider(testJwt("https://api.workos.com.attacker.example")))
         assertNull(AuthStore.jwtProvider(testJwt("http://api.workos.com")))

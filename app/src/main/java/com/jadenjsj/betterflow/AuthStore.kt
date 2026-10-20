@@ -125,14 +125,17 @@ class AuthStore(context: Context) : WisprSessionStore {
             val providerName = json.nonBlankString("provider")
             val provider = WisprAuthProvider.fromWireName(providerName)
             require(providerName == null || provider != null) { "Unsupported Wispr authentication provider" }
+            val resolvedProvider = provider ?: jwtProvider(access)
             return WisprSession(
                 email = json.nonBlankString("email") ?: json.optJSONObject("user")?.nonBlankString("email")
                     ?: decodeJwtEmail(access) ?: fallbackEmail,
                 accessToken = access,
                 refreshToken = json.nonBlankString("refresh_token"),
                 expiresAt = json.optLong("expires_at", 0L).takeIf { it > 0L } ?: jwtExpiresAt(access),
-                provider = provider ?: jwtProvider(access),
-                userId = json.nonBlankString("user_id") ?: json.optJSONObject("user")?.nonBlankString("id") ?: jwtUserId(access),
+                provider = resolvedProvider,
+                // WorkOS user.id identifies the auth-provider user, not the Wispr account.
+                userId = jwtUserId(access) ?: json.nonBlankString("user_id")
+                    ?: if (resolvedProvider == WisprAuthProvider.SUPABASE) json.optJSONObject("user")?.nonBlankString("id") else null,
             )
         }
 
